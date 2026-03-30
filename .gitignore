@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# App settings
+pac_browser.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
