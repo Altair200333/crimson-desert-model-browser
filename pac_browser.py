@@ -154,11 +154,12 @@ def load_pac_mesh(entry: PazEntry) -> GpuMesh:
         raise ValueError("No mesh descriptors")
 
     total_verts = sum(d.vertex_counts[lod] for d in descriptors)
+    total_indices = sum(d.index_counts[lod] for d in descriptors)
 
     all_positions, all_normals, all_indices = [], [], []
     vert_offset = 0
     vert_byte_offset = 0
-    idx_byte_offset = total_verts * 40
+    idx_byte_offset = geom_sec['size'] - total_indices * 2  # indices at end of section
 
     for desc in descriptors:
         vc = desc.vertex_counts[lod]
@@ -236,9 +237,10 @@ def export_model_with_textures(entry: PazEntry, output_dir: str,
 
     # Build meshes (same logic as export_pac)
     total_verts = sum(d.vertex_counts[lod] for d in descriptors)
+    total_indices = sum(d.index_counts[lod] for d in descriptors)
     meshes = []
     vert_byte_offset = 0
-    idx_byte_offset = total_verts * 40
+    idx_byte_offset = geom_sec['size'] - total_indices * 2  # indices at end of section
     for desc in descriptors:
         vc = desc.vertex_counts[lod]
         ic = desc.index_counts[lod]

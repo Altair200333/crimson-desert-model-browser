@@ -120,63 +120,71 @@ def parse_header(data: bytes) -> dict:
     return {'version': version, 'sections': sections}
 
 
-DESCRIPTOR_PATTERN = bytes([0x04, 0x00, 0x01, 0x02, 0x03])
+ATTR4_PATTERN = bytes([0x04, 0x00, 0x01, 0x02, 0x03])  # 4-attribute meshes (standard)
+ATTR3_PATTERN = bytes([0x03, 0x00, 0x01, 0x02])         # 3-attribute meshes (cloth/sim)
 
 
 def find_mesh_descriptors(data: bytes, sec0_offset: int, sec0_size: int) -> list[MeshDescriptor]:
     """Find all per-mesh descriptors in section 0 by pattern matching.
 
-    Searches for the attribute marker [04 00 01 02 03] which sits at
-    descriptor+35. The descriptor is 64 bytes of binary data preceded
-    by two length-prefixed ASCII name strings.
+    Finds both 4-attribute [04 00 01 02 03] and 3-attribute [03 00 01 02]
+    meshes. Returns them sorted by position in section 0 (matching vertex
+    buffer order in geometry sections). 3-attr meshes have 3 LODs only.
     """
-    meshes = []
     region = data[sec0_offset:sec0_offset + sec0_size]
+    found = []  # (offset_in_region, MeshDescriptor)
 
+    # Find 4-attribute descriptors (standard meshes, 4 LODs)
     pos = 0
     while True:
-        # Find next attribute marker
-        idx = region.find(DESCRIPTOR_PATTERN, pos)
+        idx = region.find(ATTR4_PATTERN, pos)
         if idx == -1:
             break
-
-        desc_start = idx - 35  # descriptor begins 35 bytes before pattern
-        if desc_start < 0:
-            pos = idx + 1
-            continue
-
-        # Validate: first byte should be 0x01
-        if region[desc_start] != 0x01:
-            pos = idx + 1
-            continue
-
-        # Read 8 floats at descriptor+3
-        floats = struct.unpack_from('<8f', region, desc_start + 3)
-        center = (floats[2], floats[3], floats[4])
-        half_ext = (floats[5], floats[6], floats[7])
-
-        # Vertex/index counts per LOD
-        vc = [struct.unpack_from('<H', region, desc_start + 40 + i * 2)[0] for i in range(4)]
-        ic = [struct.unpack_from('<I', region, desc_start + 48 + i * 4)[0] for i in range(4)]
-
-        # Walk backwards from descriptor to find the two name strings.
-        # Names are length-prefixed ASCII: [u8 len][chars...], stored
-        # consecutively (display_name then material_name) before the descriptor.
-        names = _find_name_strings(region, desc_start)
-
-        meshes.append(MeshDescriptor(
-            display_name=names[0],
-            material_name=names[1],
-            center=center,
-            half_extent=half_ext,
-            vertex_counts=vc,
-            index_counts=ic,
-            bbox_unknowns=(floats[0], floats[1]),
-        ))
-
+        desc_start = idx - 35
+        if desc_start >= 0 and region[desc_start] == 0x01:
+            floats = struct.unpack_from('<8f', region, desc_start + 3)
+            vc = [struct.unpack_from('<H', region, desc_start + 40 + i * 2)[0] for i in range(4)]
+            ic = [struct.unpack_from('<I', region, desc_start + 48 + i * 4)[0] for i in range(4)]
+            names = _find_name_strings(region, desc_start)
+            found.append((desc_start, MeshDescriptor(
+                display_name=names[0], material_name=names[1],
+                center=(floats[2], floats[3], floats[4]),
+                half_extent=(floats[5], floats[6], floats[7]),
+                vertex_counts=vc, index_counts=ic,
+                bbox_unknowns=(floats[0], floats[1]),
+            )))
         pos = idx + 5
 
-    return meshes
+    # Find 3-attribute descriptors (cloth/sim meshes, 3 LODs)
+    pos = 0
+    while True:
+        idx = region.find(ATTR3_PATTERN, pos)
+        if idx == -1:
+            break
+        desc_start = idx - 35
+        if desc_start >= 0 and region[desc_start] == 0x01:
+            # Skip false positives inside 4-attr patterns
+            if idx >= 1 and region[idx - 1] == 0x04:
+                pos = idx + 4
+                continue
+            floats = struct.unpack_from('<8f', region, desc_start + 3)
+            vc3 = [struct.unpack_from('<H', region, desc_start + 40 + i * 2)[0] for i in range(3)]
+            ic3 = [struct.unpack_from('<I', region, desc_start + 46 + i * 4)[0] for i in range(3)]
+            vc = vc3 + [0]  # pad to 4 LODs
+            ic = ic3 + [0]
+            names = _find_name_strings(region, desc_start)
+            found.append((desc_start, MeshDescriptor(
+                display_name=names[0], material_name=names[1],
+                center=(floats[2], floats[3], floats[4]),
+                half_extent=(floats[5], floats[6], floats[7]),
+                vertex_counts=vc, index_counts=ic,
+                bbox_unknowns=(floats[0], floats[1]),
+            )))
+        pos = idx + 4
+
+    # Sort by position in section 0 to match vertex buffer order
+    found.sort(key=lambda x: x[0])
+    return [desc for _, desc in found]
 
 
 def _find_name_strings(region: bytes, desc_start: int) -> tuple[str, str]:
@@ -422,13 +430,13 @@ def export_pac(pac_data: bytes, output_dir: str, name_hint: str = "",
         raise ValueError("No mesh descriptors found in section 0")
 
     # Build meshes from geometry section
-    # Combined buffer layout: all vertices first, then all indices
+    # Layout: [all verts][possibly extra data][all indices at section end]
     total_verts = sum(d.vertex_counts[lod] for d in descriptors)
-    all_verts_size = total_verts * 40
+    total_indices = sum(d.index_counts[lod] for d in descriptors)
 
     meshes = []
     vert_byte_offset = 0
-    index_byte_offset = all_verts_size
+    index_byte_offset = geom_sec['size'] - total_indices * 2  # indices at end of section
 
     for desc in descriptors:
         vc = desc.vertex_counts[lod]
