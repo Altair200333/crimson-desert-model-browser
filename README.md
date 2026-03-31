@@ -18,13 +18,12 @@ Reads PAC mesh files directly from the game's PAZ archives, displays them in an 
 - [Features](#features)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
-- [Usage](#usage)
-  - [GUI Browser](#gui-browser)
-  - [Command-line Export](#command-line-export)
-  - [Tests](#tests)
+- [GUI Browser](#gui-browser)
+- [Command-line Export](#command-line-export)
+- [Tests](#tests)
 - [How It Works](#how-it-works)
 - [Known Limitations](#known-limitations)
-- [Acknowledgments](#acknowledgments)
+- [Dependencies](#dependencies)
 
 ---
 
