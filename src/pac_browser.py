@@ -1,9 +1,8 @@
-"""Crimson Desert PAC Model Browser.
+"""Crimson Desert Model Browser.
 
-Interactive 3D browser for PAC skinned mesh files from Crimson Desert archives.
-Left panel: searchable list of all PAC models. Right panel: OpenGL 3D preview.
-First-run setup prompts user to locate game directory (saved to pac_browser.ini).
-File → Export writes OBJ + MTL + DDS textures to a user-chosen folder.
+Interactive 3D browser for PAC (skinned) and PAM (static) mesh files from
+Crimson Desert archives. Left panel: searchable list with category filter.
+Right panel: OpenGL 3D preview. File → Export writes OBJ + MTL + DDS textures.
 
 Requirements:
     pip install PySide6 PyOpenGL numpy lz4 cryptography
@@ -32,11 +31,16 @@ from pac_export import (
     decompress_type1_pac, export_pac, material_to_dds_basename, Vertex,
     write_obj, write_mtl, Mesh, _find_section_layout,
 )
+from pam_export import (
+    parse_pam_header, parse_pam_submeshes, decompress_pam_geometry,
+    detect_vertex_stride, decode_pam_vertices, decode_pam_indices,
+    export_pam,
+)
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QSplitter, QStackedWidget, QWidget,
     QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
-    QPushButton, QLabel, QFileDialog, QMenuBar, QMessageBox,
+    QPushButton, QLabel, QFileDialog, QMenuBar, QMessageBox, QComboBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QSurfaceFormat, QAction, QFont
@@ -80,6 +84,8 @@ class CatalogEntry:
     display_name: str
     paz_entry: PazEntry
     search_key: str
+    file_type: str = "pac"        # "pac" or "pam"
+    category: str = "characters"  # "characters", "objects", "effects", "terrain"
 
 
 @dataclass
@@ -264,6 +270,34 @@ QLabel#setupError {
     color: #cc4444;
     font-size: 13px;
 }
+QComboBox {
+    background-color: #22223a;
+    color: #e0e0ec;
+    border: 1px solid #33334d;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    min-width: 80px;
+}
+QComboBox:hover {
+    border-color: #5b8def;
+}
+QComboBox::drop-down {
+    border: none;
+    padding-right: 8px;
+}
+QComboBox::down-arrow {
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 6px solid #7878a0;
+}
+QComboBox QAbstractItemView {
+    background-color: #1e1e38;
+    color: #d4d4e0;
+    border: 1px solid #2e2e48;
+    selection-background-color: #2e4a7a;
+    outline: none;
+}
 QMessageBox {
     background-color: #1e1e38;
 }
@@ -275,26 +309,58 @@ QMessageBox QLabel {
 
 # ── Catalog builder ─────────────────────────────────────────────────
 
-def build_catalog(game_dir: str) -> tuple[list[CatalogEntry], list[PazEntry]]:
-    """Returns (catalog, all_pamt_entries). all_pamt_entries cached for texture export."""
-    dir_0009 = os.path.join(game_dir, "0009")
-    pamt_path = os.path.join(dir_0009, "0.pamt")
-    all_entries = parse_pamt(pamt_path, paz_dir=dir_0009)
+# Maps game directory name → (category, file extensions to include)
+DIR_CONFIG = {
+    "0009": ("characters", {".pac"}),
+    "0000": ("objects", {".pam"}),
+    "0007": ("effects", {".pam"}),
+    "0015": ("terrain", {".pam"}),
+}
 
-    pac_entries = [
-        e for e in all_entries
-        if e.path.lower().endswith('.pac')
-        and (not e.compressed or e.compression_type == 1)
-    ]
 
+def build_catalog(game_dir: str, progress_fn=None) -> tuple[list[CatalogEntry], list[PazEntry]]:
+    """Returns (catalog, all_entries). Scans multiple game directories.
+
+    all_entries is a flat list of PazEntry (filtered to .pac/.pam/.dds only)
+    cached for texture export across all directories.
+    """
     catalog = []
-    for e in pac_entries:
-        fname = os.path.basename(e.path)
-        stem = os.path.splitext(fname)[0]
-        catalog.append(CatalogEntry(
-            filename=fname, display_name=stem,
-            paz_entry=e, search_key=stem.lower(),
-        ))
+    all_entries = []
+
+    for dir_name, (category, extensions) in DIR_CONFIG.items():
+        sub_dir = os.path.join(game_dir, dir_name)
+        pamt_path = os.path.join(sub_dir, "0.pamt")
+        if not os.path.isfile(pamt_path):
+            continue
+
+        if progress_fn:
+            progress_fn(f"Parsing {dir_name} ({category})...")
+
+        entries = parse_pamt(pamt_path, paz_dir=sub_dir)
+
+        # Cache only mesh and texture entries (skip .xml, .prefab, .hkx, etc.)
+        useful_exts = extensions | {".dds"}
+        for e in entries:
+            lower = e.path.lower()
+            if any(lower.endswith(ext) for ext in useful_exts):
+                all_entries.append(e)
+
+        # Build catalog entries for mesh files
+        file_type = "pac" if ".pac" in extensions else "pam"
+        for e in entries:
+            lower = e.path.lower()
+            if not any(lower.endswith(ext) for ext in extensions):
+                continue
+            if e.compressed and e.compression_type not in (0, 1):
+                continue
+
+            fname = os.path.basename(e.path)
+            stem = os.path.splitext(fname)[0]
+            catalog.append(CatalogEntry(
+                filename=fname, display_name=stem,
+                paz_entry=e, search_key=stem.lower(),
+                file_type=file_type, category=category,
+            ))
 
     catalog.sort(key=lambda c: c.display_name.lower())
     return catalog, all_entries
@@ -311,6 +377,15 @@ def read_pac_bytes(entry: PazEntry) -> bytes:
     if entry.compressed and entry.compression_type == 1:
         raw = decompress_type1_pac(raw, entry.orig_size)
     return raw
+
+
+def read_pam_bytes(entry: PazEntry) -> bytes:
+    """Read PAM bytes from PAZ archive and decompress internal geometry if needed."""
+    read_size = entry.comp_size if entry.compressed else entry.orig_size
+    with open(entry.paz_file, 'rb') as f:
+        f.seek(entry.offset)
+        raw = f.read(read_size)
+    return decompress_pam_geometry(raw)
 
 
 def load_pac_mesh(entry: PazEntry) -> GpuMesh:
@@ -404,6 +479,55 @@ def load_pac_mesh(entry: PazEntry) -> GpuMesh:
             vert_offset += vc
 
         idx_byte_offset += ic * 2
+
+    positions = np.array(all_positions, dtype=np.float32)
+    normals = np.array(all_normals, dtype=np.float32)
+    indices = np.array(all_indices, dtype=np.uint32)
+
+    bbox_min = positions.min(axis=0)
+    bbox_max = positions.max(axis=0)
+    center = (bbox_min + bbox_max) / 2.0
+    radius = float(np.linalg.norm(positions - center, axis=1).max())
+    if radius < 1e-6:
+        radius = 1.0
+
+    return GpuMesh(positions, normals, indices, center, radius)
+
+
+# ── PAM loader (geometry for preview) ──────────────────────────────
+
+def load_pam_mesh(entry: PazEntry) -> GpuMesh:
+    raw = read_pam_bytes(entry)
+    header = parse_pam_header(raw)
+    submeshes = parse_pam_submeshes(raw, header['mesh_count'])
+    if not submeshes:
+        raise ValueError("No submeshes found")
+
+    stride = detect_vertex_stride(header, submeshes)
+    total_nv = sum(s.nv for s in submeshes)
+    geom_off = header['geom_off']
+    idx_byte_start = geom_off + total_nv * stride
+
+    all_positions, all_normals, all_indices = [], [], []
+    vert_offset = 0
+
+    for sub in submeshes:
+        if sub.nv == 0:
+            continue
+
+        verts = decode_pam_vertices(
+            raw, geom_off, sub.voff * stride,
+            sub.nv, header['bbox_min'], header['bbox_max'], stride)
+
+        indices = decode_pam_indices(
+            raw, idx_byte_start + sub.ioff * 2, sub.ni)
+
+        for v in verts:
+            all_positions.append([v.pos[0], v.pos[1], v.pos[2]])
+            all_normals.append([v.normal[0], v.normal[1], v.normal[2]])
+        for idx in indices:
+            all_indices.append(idx + vert_offset)
+        vert_offset += sub.nv
 
     positions = np.array(all_positions, dtype=np.float32)
     normals = np.array(all_normals, dtype=np.float32)
@@ -539,6 +663,68 @@ def export_model_with_textures(entry: PazEntry, output_dir: str,
         'textures_extracted': extracted, 'textures_expected': len(dds_wanted),
         'export_dir': model_dir,
     }
+
+
+def export_pam_with_textures(entry: PazEntry, output_dir: str,
+                              game_dir: str, progress_fn=None,
+                              cached_entries: list[PazEntry] = None) -> dict:
+    """Export PAM model as OBJ + MTL + DDS textures."""
+    from paz_unpack import extract_entry as paz_extract_entry
+
+    pam_data = read_pam_bytes(entry)
+    model_name = os.path.splitext(os.path.basename(entry.path))[0]
+    model_dir = os.path.join(output_dir, model_name)
+    tex_dir = os.path.join(model_dir, "textures")
+    os.makedirs(tex_dir, exist_ok=True)
+
+    # Get texture names from submesh table
+    header = parse_pam_header(pam_data)
+    submeshes = parse_pam_submeshes(pam_data, header['mesh_count'])
+
+    dds_wanted = set()
+    for sub in submeshes:
+        if sub.texture_name:
+            dds_wanted.add(sub.texture_name.lower())
+
+    # Extract DDS textures
+    if progress_fn:
+        progress_fn("Extracting textures...")
+
+    all_entries = cached_entries or []
+    available = set()
+    extracted = 0
+    for dds_name in dds_wanted:
+        matches = [e for e in all_entries
+                   if os.path.basename(e.path).lower() == dds_name]
+        for m in matches:
+            try:
+                paz_extract_entry(m, tex_dir, decrypt_xml=False)
+                nested = os.path.join(tex_dir, m.path.replace('/', os.sep))
+                flat = os.path.join(tex_dir, os.path.basename(m.path))
+                if os.path.exists(nested) and nested != flat:
+                    os.replace(nested, flat)
+                    try:
+                        d = os.path.dirname(nested)
+                        while d != tex_dir:
+                            os.rmdir(d)
+                            d = os.path.dirname(d)
+                    except OSError:
+                        pass
+                available.add(dds_name)
+                extracted += 1
+            except Exception:
+                pass
+
+    # Write OBJ + MTL
+    if progress_fn:
+        progress_fn("Writing OBJ + MTL...")
+
+    result = export_pam(pam_data, model_dir, name_hint=model_name,
+                        texture_rel_dir="textures", available_textures=available)
+    result['textures_extracted'] = extracted
+    result['textures_expected'] = len(dds_wanted)
+    result['export_dir'] = model_dir
+    return result
 
 
 # ── Orbit camera ────────────────────────────────────────────────────
@@ -791,8 +977,8 @@ class CatalogWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit("Parsing PAMT index...")
-            catalog, all_entries = build_catalog(self._game_dir)
+            catalog, all_entries = build_catalog(self._game_dir,
+                                                 progress_fn=self.progress.emit)
             self.catalog_ready.emit(catalog, all_entries)
         except Exception as e:
             self.failed.emit(str(e))
@@ -808,7 +994,10 @@ class LoadWorker(QThread):
 
     def run(self):
         try:
-            mesh = load_pac_mesh(self._entry.paz_entry)
+            if self._entry.file_type == "pam":
+                mesh = load_pam_mesh(self._entry.paz_entry)
+            else:
+                mesh = load_pac_mesh(self._entry.paz_entry)
             self.mesh_ready.emit(mesh)
         except Exception as e:
             self.load_error.emit(f"{self._entry.filename}: {e}")
@@ -828,10 +1017,16 @@ class ExportWorker(QThread):
 
     def run(self):
         try:
-            result = export_model_with_textures(
-                self._entry.paz_entry, self._output_dir,
-                self._game_dir, progress_fn=self.progress.emit,
-                cached_entries=self._cached_entries)
+            if self._entry.file_type == "pam":
+                result = export_pam_with_textures(
+                    self._entry.paz_entry, self._output_dir,
+                    self._game_dir, progress_fn=self.progress.emit,
+                    cached_entries=self._cached_entries)
+            else:
+                result = export_model_with_textures(
+                    self._entry.paz_entry, self._output_dir,
+                    self._game_dir, progress_fn=self.progress.emit,
+                    cached_entries=self._cached_entries)
             self.export_done.emit(result)
         except Exception as e:
             self.export_error.emit(str(e))
@@ -848,7 +1043,7 @@ class SetupScreen(QWidget):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        title = QLabel("Crimson Desert PAC Browser")
+        title = QLabel("Crimson Desert Model Browser")
         title.setObjectName("setupTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -899,7 +1094,7 @@ class SetupScreen(QWidget):
 class BrowserWindow(QMainWindow):
     def __init__(self, game_dir: str):
         super().__init__()
-        self.setWindowTitle("Crimson Desert PAC Browser")
+        self.setWindowTitle("Crimson Desert Model Browser")
         self.resize(1280, 800)
 
         self._game_dir = game_dir
@@ -938,11 +1133,16 @@ class BrowserWindow(QMainWindow):
         layout = QVBoxLayout(left)
         layout.setContentsMargins(8, 8, 4, 8)
         layout.setSpacing(6)
+        self._category_filter = QComboBox()
+        self._category_filter.addItems(["All", "Characters", "Objects", "Effects", "Terrain"])
+        self._category_filter.setEnabled(False)
+        self._category_filter.currentTextChanged.connect(self._apply_filters)
+        layout.addWidget(self._category_filter)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search models...")
         self._search.setClearButtonEnabled(True)
         self._search.setEnabled(False)
-        self._search.textChanged.connect(self._on_search)
+        self._search.textChanged.connect(self._apply_filters)
         layout.addWidget(self._search)
         self._count_label = QLabel("")
         self._count_label.setObjectName("countLabel")
@@ -997,36 +1197,46 @@ class BrowserWindow(QMainWindow):
         self._all_entries = all_entries
         self._filtered = catalog
         self._populate_list(catalog)
+        pac_count = sum(1 for e in catalog if e.file_type == "pac")
+        pam_count = sum(1 for e in catalog if e.file_type == "pam")
         self._count_label.setText(f"{len(catalog):,} models")
         self._search.setEnabled(True)
+        self._category_filter.setEnabled(True)
         self._search.setFocus()
         self._right_stack.setCurrentIndex(1)
-        self.statusBar().showMessage(f"Loaded {len(catalog):,} PAC files")
+        self.statusBar().showMessage(
+            f"Loaded {pac_count:,} PAC + {pam_count:,} PAM = {len(catalog):,} models")
 
     def _on_catalog_failed(self, msg):
         self._loading_label.setText(f"Failed to load catalog:\n{msg}")
         self.statusBar().showMessage(f"Error: {msg}")
 
-    def _on_search(self, text):
-        key = text.strip().lower()
-        if not key:
-            self._filtered = self._catalog
-        else:
+    def _apply_filters(self, _=None):
+        category = self._category_filter.currentText().lower()
+        key = self._search.text().strip().lower()
+
+        filtered = self._catalog
+        if category != "all":
+            filtered = [e for e in filtered if e.category == category]
+        if key:
             terms = key.split()
-            self._filtered = [
-                e for e in self._catalog
-                if all(t in e.search_key for t in terms)
-            ]
-        self._populate_list(self._filtered)
-        count = len(self._filtered)
-        self._count_label.setText(f"{count:,} matches" if key else f"{count:,} models")
+            filtered = [e for e in filtered if all(t in e.search_key for t in terms)]
+
+        self._filtered = filtered
+        self._populate_list(filtered)
+        count = len(filtered)
+        self._count_label.setText(f"{count:,} matches" if key or category != "all" else f"{count:,} models")
         self.statusBar().showMessage(f"{count:,} matches")
 
     def _populate_list(self, entries):
         self._list.setUpdatesEnabled(False)
         self._list.clear()
         for e in entries:
-            item = QListWidgetItem(e.display_name)
+            label = e.display_name
+            if self._category_filter.currentText() == "All":
+                tag = "PAC" if e.file_type == "pac" else "PAM"
+                label = f"{e.display_name}  [{tag}]"
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, e)
             self._list.addItem(item)
         self._list.setUpdatesEnabled(True)
@@ -1125,7 +1335,7 @@ def main():
     else:
         # Show setup screen inside a plain window
         win = QMainWindow()
-        win.setWindowTitle("Crimson Desert PAC Browser")
+        win.setWindowTitle("Crimson Desert Model Browser")
         win.resize(800, 400)
         setup = SetupScreen(win)
 
