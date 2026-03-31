@@ -686,7 +686,7 @@ def main():
     elif args.paz_dir:
         # PAZ archive mode — requires lazorr410 unpacker
         try:
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lazorr410-unpacker', 'python'))
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'lazorr410-unpacker', 'python'))
             from paz_parse import parse_pamt
             from paz_unpack import extract_entry
         except ImportError:

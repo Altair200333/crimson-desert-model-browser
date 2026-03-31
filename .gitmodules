@@ -1,0 +1,3 @@
+[submodule "lazorr410-unpacker"]
+	path = lazorr410-unpacker
+	url = https://github.com/lazorr410/crimson-desert-unpacker.git

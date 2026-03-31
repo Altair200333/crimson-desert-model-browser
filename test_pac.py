@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', 'lazorr410-unpacker', 'python'))
+                                'lazorr410-unpacker', 'python'))
 
 from paz_parse import parse_pamt
 from pac_export import (parse_header, find_mesh_descriptors, decode_vertices,

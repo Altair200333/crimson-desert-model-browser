@@ -20,8 +20,7 @@ from dataclasses import dataclass
 # ── Path setup ──────────────────────────────────────────────────────
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(TOOLS_DIR)
-UNPACKER_DIR = os.path.join(PROJECT_DIR, "lazorr410-unpacker", "python")
+UNPACKER_DIR = os.path.join(TOOLS_DIR, "lazorr410-unpacker", "python")
 sys.path.insert(0, UNPACKER_DIR)
 sys.path.insert(0, TOOLS_DIR)
 
