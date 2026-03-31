@@ -319,6 +319,130 @@ def material_to_dds_basename(mat_name: str) -> str:
 
 # ── OBJ + MTL writing ──────────────────────────────────────────────
 
+def _find_section_layout(data: bytes, geom_sec: dict, descriptors: list,
+                         lod: int, total_indices: int) -> tuple[int, int]:
+    """Find vertex start and index start offsets within a geometry section.
+
+    Returns (vert_start, index_start) as byte offsets within the section.
+
+    Standard layout (no gap): [primary verts][primary indices]
+    Gap layout: [secondary verts][primary verts][secondary indices][primary indices][extra indices]
+
+    Secondary verts detected by scanning from section start for 40-byte records
+    with bytes[36:40] == FF FF FF FF that precede the primary vertex data.
+    Primary index start found by scanning for first index value == 0.
+    """
+    sec_off = geom_sec['offset']
+    sec_size = geom_sec['size']
+    total_verts = sum(d.vertex_counts[lod] for d in descriptors)
+
+    # No gap — standard layout
+    primary_bytes = total_verts * 40
+    index_bytes = total_indices * 2
+    if primary_bytes + index_bytes >= sec_size:
+        return 0, primary_bytes
+
+    gap = sec_size - primary_bytes - index_bytes
+    if gap <= 0:
+        return 0, primary_bytes
+
+    # Determine layout based on gap size relative to primary data.
+    # Large gap (>10% of primary): secondary verts likely BEFORE primary verts
+    # Small gap (<10%): secondary verts AFTER primary verts (original layout)
+    gap_ratio = gap / max(primary_bytes, 1)
+
+    # Try both layouts and pick the one with better geometry quality:
+    # Layout A: [primary verts @ 0][secondary][indices near end]
+    # Layout B: [secondary verts @ 0][primary verts][indices after]
+    import numpy as _np
+
+    first_vc = next((d.vertex_counts[lod] for d in descriptors if d.vertex_counts[lod] > 0), 0)
+    if first_vc == 0:
+        return 0, primary_bytes
+
+    secondary_bytes = (gap // 40) * 40
+
+    def _scan_idx_start(after_verts):
+        """Find primary index start by scanning for first u16 == 0."""
+        for adj in range(0, sec_size - after_verts, 2):
+            t = after_verts + adj
+            if t + 6 > sec_size:
+                break
+            if struct.unpack_from('<H', data, sec_off + t)[0] == 0:
+                v1 = struct.unpack_from('<H', data, sec_off + t + 2)[0]
+                v2 = struct.unpack_from('<H', data, sec_off + t + 4)[0]
+                if v1 < first_vc and v2 < first_vc:
+                    return t
+        return None
+
+    def _measure_quality(v_start, i_start):
+        """Measure triangle quality across the mesh (sum of sampled edge lengths)."""
+        if i_start is None or i_start + total_indices * 2 > sec_size:
+            return 999.0
+        verts = decode_vertices(data, sec_off, first_vc,
+                                descriptors[0], vertex_start=v_start)
+        pos = _np.array([v.pos for v in verts], dtype=_np.float32)
+        first_ic = next((d.index_counts[lod] for d in descriptors if d.index_counts[lod] > 0), 0)
+        n_tris = first_ic // 3
+        # Sample triangles evenly across the entire mesh
+        sample_indices = list(range(0, n_tris, max(1, n_tris // 30)))[:30]
+        total_edge = 0.0
+        for t in sample_indices:
+            i0 = struct.unpack_from('<H', data, sec_off + i_start + t * 6)[0]
+            i1 = struct.unpack_from('<H', data, sec_off + i_start + t * 6 + 2)[0]
+            i2 = struct.unpack_from('<H', data, sec_off + i_start + t * 6 + 4)[0]
+            if max(i0, i1, i2) >= len(pos):
+                return 999.0
+            p0, p1, p2 = pos[i0], pos[i1], pos[i2]
+            total_edge += max(float(_np.linalg.norm(p1 - p0)), float(_np.linalg.norm(p2 - p1)),
+                              float(_np.linalg.norm(p0 - p2)))
+        return total_edge
+
+    # Try every possible secondary vert count (0, 1, 2, ..., gap//40)
+    # and pick the one with best first-triangle quality
+    best_vs = 0
+    best_is = primary_bytes + secondary_bytes
+    best_q = _measure_quality(0, best_is) if best_is + total_indices * 2 <= sec_size else 999.0
+
+    for n_sec in range(0, gap // 40 + 1):
+        vs = n_sec * 40
+        all_end = vs + primary_bytes
+        if all_end >= sec_size:
+            break
+        idx = _scan_idx_start(all_end)
+        if idx is None or idx + total_indices * 2 > sec_size:
+            continue
+        q = _measure_quality(vs, idx)
+        if q < best_q:
+            best_q = q
+            best_vs = vs
+            best_is = idx
+
+    return best_vs, best_is
+
+    all_verts_end = vert_start + primary_bytes
+
+    if vert_start == 0:
+        # Secondary-after: use gap-adjusted formula (no scan needed)
+        secondary_bytes = (gap // 40) * 40
+        return 0, primary_bytes + secondary_bytes
+
+    # Secondary-first: scan for primary index start (first u16 == 0 after vertex data)
+    first_vc = next((d.vertex_counts[lod] for d in descriptors if d.vertex_counts[lod] > 0), 999)
+    for adj in range(0, sec_size - all_verts_end, 2):
+        trial = all_verts_end + adj
+        if trial + 6 > sec_size:
+            break
+        v0 = struct.unpack_from('<H', data, sec_off + trial)[0]
+        if v0 == 0:
+            v1 = struct.unpack_from('<H', data, sec_off + trial + 2)[0]
+            v2 = struct.unpack_from('<H', data, sec_off + trial + 4)[0]
+            if v1 < first_vc and v2 < first_vc:
+                return vert_start, trial
+
+    return vert_start, all_verts_end
+
+
 def write_mtl(meshes: list[Mesh], mtl_path: str, texture_rel_dir: str = "",
               available_textures: set = None):
     """Write Wavefront MTL file with DDS texture references.
@@ -430,29 +554,62 @@ def export_pac(pac_data: bytes, output_dir: str, name_hint: str = "",
         raise ValueError("No mesh descriptors found in section 0")
 
     # Build meshes from geometry section
-    # Layout: [all verts][possibly extra data][all indices at section end]
+    # Layout: [secondary verts][primary verts][secondary indices][primary indices][extra indices]
     total_verts = sum(d.vertex_counts[lod] for d in descriptors)
     total_indices = sum(d.index_counts[lod] for d in descriptors)
+    vert_base, index_byte_offset = _find_section_layout(
+        pac_data, geom_sec, descriptors, lod, total_indices)
+
+    # Precompute per-descriptor byte offsets in vertex buffer (after vert_base)
+    desc_vert_offsets = []
+    off = vert_base
+    for d in descriptors:
+        desc_vert_offsets.append(off)
+        off += d.vertex_counts[lod] * 40
 
     meshes = []
-    vert_byte_offset = 0
-    index_byte_offset = geom_sec['size'] - total_indices * 2  # indices at end of section
+    # Track partner mesh index for shared buffers (to share Mesh.vertices in OBJ)
+    partner_map = {}  # di -> partner_di
 
-    for desc in descriptors:
+    # First pass: detect shared buffers
+    idx_off_check = index_byte_offset
+    for di, desc in enumerate(descriptors):
+        ic = desc.index_counts[lod]
+        vc = desc.vertex_counts[lod]
+        if vc == 0:
+            idx_off_check += ic * 2
+            continue
+        raw_indices = decode_indices(pac_data, geom_sec['offset'], ic, 0,
+                                     index_start=idx_off_check)
+        max_idx = max(raw_indices) if raw_indices else 0
+        if max_idx >= vc:
+            for pj, pd in enumerate(descriptors):
+                if pd.vertex_counts[lod] > max_idx and pj != di:
+                    partner_map[di] = pj
+                    break
+        idx_off_check += ic * 2
+
+    # Second pass: build meshes
+    for di, desc in enumerate(descriptors):
         vc = desc.vertex_counts[lod]
         ic = desc.index_counts[lod]
-
         if vc == 0:
             continue
 
-        vertices = decode_vertices(
-            pac_data, geom_sec['offset'], vc, desc,
-            vertex_start=vert_byte_offset
-        )
-        indices = decode_indices(
-            pac_data, geom_sec['offset'], ic, 0,
-            index_start=index_byte_offset
-        )
+        indices = decode_indices(pac_data, geom_sec['offset'], ic, 0,
+                                 index_start=index_byte_offset)
+
+        if di in partner_map:
+            pj = partner_map[di]
+            vertices = decode_vertices(
+                pac_data, geom_sec['offset'], descriptors[pj].vertex_counts[lod], desc,
+                vertex_start=desc_vert_offsets[pj]
+            )
+        else:
+            vertices = decode_vertices(
+                pac_data, geom_sec['offset'], vc, desc,
+                vertex_start=desc_vert_offsets[di]
+            )
 
         meshes.append(Mesh(
             name=desc.display_name,
@@ -461,7 +618,6 @@ def export_pac(pac_data: bytes, output_dir: str, name_hint: str = "",
             indices=indices,
         ))
 
-        vert_byte_offset += vc * 40
         index_byte_offset += ic * 2
 
     if not meshes:

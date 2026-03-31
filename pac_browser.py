@@ -30,13 +30,13 @@ from paz_crypto import decrypt as paz_decrypt, lz4_decompress
 from pac_export import (
     parse_header, find_mesh_descriptors, decode_vertices, decode_indices,
     decompress_type1_pac, export_pac, material_to_dds_basename, Vertex,
-    write_obj, write_mtl, Mesh,
+    write_obj, write_mtl, Mesh, _find_section_layout,
 )
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QLabel,
-    QFileDialog, QMenuBar, QMessageBox,
+    QApplication, QMainWindow, QSplitter, QStackedWidget, QWidget,
+    QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
+    QPushButton, QLabel, QFileDialog, QMenuBar, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QSurfaceFormat, QAction, QFont
@@ -89,6 +89,188 @@ class GpuMesh:
     indices: "np.ndarray"
     center: "np.ndarray"
     radius: float
+
+
+# ── Theme ──────────────────────────────────────────────────────────
+
+DARK_STYLE = """
+* {
+    font-family: "Segoe UI", sans-serif;
+}
+QMainWindow, QWidget {
+    background-color: #1a1a2e;
+    color: #d4d4e0;
+}
+QMenuBar {
+    background-color: #14142a;
+    color: #b0b0c0;
+    border-bottom: 1px solid #2a2a42;
+    padding: 2px 0;
+    font-size: 13px;
+}
+QMenuBar::item {
+    padding: 4px 10px;
+    border-radius: 4px;
+}
+QMenuBar::item:selected {
+    background-color: #2e2e4a;
+}
+QMenu {
+    background-color: #1e1e38;
+    color: #d4d4e0;
+    border: 1px solid #2e2e48;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 6px 24px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background-color: #3a3a5c;
+}
+QMenu::separator {
+    height: 1px;
+    background: #2e2e48;
+    margin: 4px 8px;
+}
+QLineEdit {
+    background-color: #22223a;
+    color: #e0e0ec;
+    border: 1px solid #33334d;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    selection-background-color: #4a6fa5;
+}
+QLineEdit:focus {
+    border-color: #5b8def;
+}
+QListWidget {
+    background-color: #1a1a30;
+    color: #c8c8d8;
+    border: 1px solid #2a2a42;
+    border-radius: 6px;
+    outline: none;
+    font-size: 12px;
+    padding: 2px;
+}
+QListWidget::item {
+    padding: 4px 8px;
+    border-radius: 3px;
+}
+QListWidget::item:selected {
+    background-color: #2e4a7a;
+    color: #ffffff;
+}
+QListWidget::item:hover:!selected {
+    background-color: #22223a;
+}
+QSplitter::handle {
+    background-color: #2a2a42;
+}
+QSplitter::handle:horizontal {
+    width: 2px;
+}
+QStatusBar {
+    background-color: #14142a;
+    color: #7878a0;
+    border-top: 1px solid #2a2a42;
+    font-size: 12px;
+}
+QStatusBar::item {
+    border: none;
+}
+QPushButton {
+    background-color: #2e4a7a;
+    color: #e8e8f0;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #3a5a90;
+}
+QPushButton:pressed {
+    background-color: #243d65;
+}
+QPushButton:disabled {
+    background-color: #22223a;
+    color: #555568;
+}
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #3a3a55;
+    min-height: 30px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #4a4a68;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+    height: 0;
+}
+QScrollBar:horizontal {
+    background: transparent;
+    height: 8px;
+    margin: 0;
+}
+QScrollBar::handle:horizontal {
+    background: #3a3a55;
+    min-width: 30px;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #4a4a68;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
+    width: 0;
+}
+QLabel#countLabel {
+    color: #5a5a78;
+    font-size: 11px;
+    padding: 0 4px;
+}
+QLabel#infoStrip {
+    color: #8888a0;
+    background-color: #14142a;
+    border-top: 1px solid #2a2a42;
+    padding: 4px 12px;
+    font-size: 12px;
+}
+QLabel#loadingLabel {
+    color: #6a6a88;
+    font-size: 16px;
+}
+QLabel#setupTitle {
+    color: #e0e0f0;
+    font-size: 24px;
+    font-weight: bold;
+}
+QLabel#setupHint {
+    color: #7878a0;
+    font-size: 14px;
+}
+QLabel#setupError {
+    color: #cc4444;
+    font-size: 13px;
+}
+QMessageBox {
+    background-color: #1e1e38;
+}
+QMessageBox QLabel {
+    color: #d4d4e0;
+}
+"""
 
 
 # ── Catalog builder ─────────────────────────────────────────────────
@@ -155,34 +337,72 @@ def load_pac_mesh(entry: PazEntry) -> GpuMesh:
 
     total_verts = sum(d.vertex_counts[lod] for d in descriptors)
     total_indices = sum(d.index_counts[lod] for d in descriptors)
+    vert_base, idx_byte_offset = _find_section_layout(
+        raw, geom_sec, descriptors, lod, total_indices)
+
+    # Precompute vertex byte offsets per descriptor (after vert_base)
+    desc_vert_offsets = []
+    off = vert_base
+    for d in descriptors:
+        desc_vert_offsets.append(off)
+        off += d.vertex_counts[lod] * 40
 
     all_positions, all_normals, all_indices = [], [], []
     vert_offset = 0
-    vert_byte_offset = 0
-    idx_byte_offset = geom_sec['size'] - total_indices * 2  # indices at end of section
+    # Track which descriptor index maps to which output vert_offset (for shared buffers)
+    desc_output_offset = {}
 
-    for desc in descriptors:
+    for di, desc in enumerate(descriptors):
         vc = desc.vertex_counts[lod]
         ic = desc.index_counts[lod]
         if vc == 0:
             continue
 
-        vertices = decode_vertices(raw, geom_sec['offset'], vc, desc,
-                                   vertex_start=vert_byte_offset)
+        vert_byte_offset = desc_vert_offsets[di]
+
+        # Read indices to check for shared vertex buffer
         indices = decode_indices(raw, geom_sec['offset'], ic, 0,
                                 index_start=idx_byte_offset)
+        max_idx = max(indices) if indices else 0
 
-        for v in vertices:
-            x, y, z = v.pos
-            all_positions.append([x, y, z])
-            nx, ny, nz = v.normal
-            all_normals.append([nx, ny, nz])
+        if max_idx >= vc:
+            # Shared buffer: reuse partner's vertices (already emitted)
+            partner_idx = None
+            for pj, pd in enumerate(descriptors):
+                pvc = pd.vertex_counts[lod]
+                if pvc > max_idx and pj != di:
+                    partner_idx = pj
+                    break
 
-        for idx in indices:
-            all_indices.append(idx + vert_offset)
+            if partner_idx is not None and partner_idx in desc_output_offset:
+                # Partner already emitted — just reference its verts
+                for idx in indices:
+                    all_indices.append(idx + desc_output_offset[partner_idx])
+            else:
+                # Partner not yet emitted — emit from partner's buffer
+                p_off = desc_vert_offsets[partner_idx] if partner_idx is not None else vert_byte_offset
+                p_vc = descriptors[partner_idx].vertex_counts[lod] if partner_idx is not None else vc
+                vertices = decode_vertices(raw, geom_sec['offset'], p_vc, desc,
+                                           vertex_start=p_off)
+                desc_output_offset[di] = vert_offset
+                for v in vertices:
+                    all_positions.append([v.pos[0], v.pos[1], v.pos[2]])
+                    all_normals.append([v.normal[0], v.normal[1], v.normal[2]])
+                for idx in indices:
+                    all_indices.append(idx + vert_offset)
+                vert_offset += p_vc
+        else:
+            # Normal mesh — emit vertices
+            vertices = decode_vertices(raw, geom_sec['offset'], vc, desc,
+                                       vertex_start=vert_byte_offset)
+            desc_output_offset[di] = vert_offset
+            for v in vertices:
+                all_positions.append([v.pos[0], v.pos[1], v.pos[2]])
+                all_normals.append([v.normal[0], v.normal[1], v.normal[2]])
+            for idx in indices:
+                all_indices.append(idx + vert_offset)
+            vert_offset += vc
 
-        vert_offset += vc
-        vert_byte_offset += vc * 40
         idx_byte_offset += ic * 2
 
     positions = np.array(all_positions, dtype=np.float32)
@@ -238,9 +458,10 @@ def export_model_with_textures(entry: PazEntry, output_dir: str,
     # Build meshes (same logic as export_pac)
     total_verts = sum(d.vertex_counts[lod] for d in descriptors)
     total_indices = sum(d.index_counts[lod] for d in descriptors)
+    vert_base, idx_byte_offset = _find_section_layout(
+        pac_data, geom_sec, descriptors, lod, total_indices)
     meshes = []
-    vert_byte_offset = 0
-    idx_byte_offset = geom_sec['size'] - total_indices * 2  # indices at end of section
+    vert_byte_offset = vert_base
     for desc in descriptors:
         vc = desc.vertex_counts[lod]
         ic = desc.index_counts[lod]
@@ -336,7 +557,7 @@ class OrbitCamera:
         self.target = center.copy()
         half_fov = math.radians(self.fov_y * 0.5)
         self.radius = radius / math.sin(half_fov) * 1.3
-        self.yaw = 0.0
+        self.yaw = math.pi
         self.pitch = 0.3
 
     def eye_position(self):
@@ -463,7 +684,7 @@ class ModelViewer(QOpenGLWidget):
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_MULTISAMPLE)
-        glClearColor(0.14, 0.14, 0.16, 1.0)
+        glClearColor(0.10, 0.10, 0.18, 1.0)
         self._compile_shaders()
         self._setup_buffers()
 
@@ -628,26 +849,22 @@ class SetupScreen(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         title = QLabel("Crimson Desert PAC Browser")
+        title.setObjectName("setupTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = QFont()
-        font.setPointSize(18)
-        font.setBold(True)
-        title.setFont(font)
         layout.addWidget(title)
 
-        layout.addSpacing(20)
+        layout.addSpacing(12)
 
         hint = QLabel("Select your Crimson Desert installation folder to get started.")
+        hint.setObjectName("setupHint")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(hint)
 
-        layout.addSpacing(20)
+        layout.addSpacing(24)
 
         btn = QPushButton("Locate Crimson Desert")
         btn.setMinimumSize(QSize(300, 50))
-        btn_font = QFont()
-        btn_font.setPointSize(13)
-        btn.setFont(btn_font)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(self._on_browse)
 
         # Center the button
@@ -659,8 +876,8 @@ class SetupScreen(QWidget):
 
         layout.addSpacing(10)
         self._status = QLabel("")
+        self._status.setObjectName("setupError")
         self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status.setStyleSheet("color: #cc4444;")
         layout.addWidget(self._status)
 
     def _on_browse(self):
@@ -719,20 +936,49 @@ class BrowserWindow(QMainWindow):
         # Left panel
         left = QWidget()
         layout = QVBoxLayout(left)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 8, 4, 8)
+        layout.setSpacing(6)
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search models...")
+        self._search.setClearButtonEnabled(True)
+        self._search.setEnabled(False)
         self._search.textChanged.connect(self._on_search)
         layout.addWidget(self._search)
+        self._count_label = QLabel("")
+        self._count_label.setObjectName("countLabel")
+        layout.addWidget(self._count_label)
         self._list = QListWidget()
         self._list.currentItemChanged.connect(self._on_selection)
         layout.addWidget(self._list)
 
-        # Right panel
+        # Right panel (loading screen / viewer + info strip)
+        self._right_stack = QStackedWidget()
+
+        # Page 0: loading screen
+        loading_page = QWidget()
+        loading_layout = QVBoxLayout(loading_page)
+        loading_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label = QLabel("Loading catalog...")
+        self._loading_label.setObjectName("loadingLabel")
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        loading_layout.addWidget(self._loading_label)
+        self._right_stack.addWidget(loading_page)
+
+        # Page 1: viewer + info strip
+        viewer_page = QWidget()
+        viewer_layout = QVBoxLayout(viewer_page)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.setSpacing(0)
         self._viewer = ModelViewer()
+        viewer_layout.addWidget(self._viewer, 1)
+        self._info_strip = QLabel("Select a model to preview")
+        self._info_strip.setObjectName("infoStrip")
+        self._info_strip.setFixedHeight(28)
+        viewer_layout.addWidget(self._info_strip)
+        self._right_stack.addWidget(viewer_page)
 
         splitter.addWidget(left)
-        splitter.addWidget(self._viewer)
+        splitter.addWidget(self._right_stack)
         splitter.setSizes([320, 960])
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("Starting...")
@@ -742,7 +988,8 @@ class BrowserWindow(QMainWindow):
         self._cat_worker = CatalogWorker(self._game_dir, self)
         self._cat_worker.catalog_ready.connect(self._on_catalog_ready)
         self._cat_worker.progress.connect(self.statusBar().showMessage)
-        self._cat_worker.failed.connect(lambda m: self.statusBar().showMessage(f"Error: {m}"))
+        self._cat_worker.progress.connect(self._loading_label.setText)
+        self._cat_worker.failed.connect(self._on_catalog_failed)
         self._cat_worker.start()
 
     def _on_catalog_ready(self, catalog, all_entries):
@@ -750,7 +997,15 @@ class BrowserWindow(QMainWindow):
         self._all_entries = all_entries
         self._filtered = catalog
         self._populate_list(catalog)
+        self._count_label.setText(f"{len(catalog):,} models")
+        self._search.setEnabled(True)
+        self._search.setFocus()
+        self._right_stack.setCurrentIndex(1)
         self.statusBar().showMessage(f"Loaded {len(catalog):,} PAC files")
+
+    def _on_catalog_failed(self, msg):
+        self._loading_label.setText(f"Failed to load catalog:\n{msg}")
+        self.statusBar().showMessage(f"Error: {msg}")
 
     def _on_search(self, text):
         key = text.strip().lower()
@@ -763,7 +1018,9 @@ class BrowserWindow(QMainWindow):
                 if all(t in e.search_key for t in terms)
             ]
         self._populate_list(self._filtered)
-        self.statusBar().showMessage(f"{len(self._filtered):,} matches")
+        count = len(self._filtered)
+        self._count_label.setText(f"{count:,} matches" if key else f"{count:,} models")
+        self.statusBar().showMessage(f"{count:,} matches")
 
     def _populate_list(self, entries):
         self._list.setUpdatesEnabled(False)
@@ -787,6 +1044,7 @@ class BrowserWindow(QMainWindow):
             self._load_worker.quit()
             self._load_worker.wait(500)
         self._viewer.clear_mesh()
+        self._info_strip.setText(f"Loading {entry.display_name}...")
         self.statusBar().showMessage(f"Loading {entry.filename}...")
         self._load_worker = LoadWorker(entry, self)
         self._load_worker.mesh_ready.connect(self._on_mesh_ready)
@@ -797,9 +1055,11 @@ class BrowserWindow(QMainWindow):
         self._viewer.load_mesh(mesh)
         tris = len(mesh.indices) // 3
         verts = len(mesh.positions)
+        self._info_strip.setText(f"{verts:,} vertices  \u00b7  {tris:,} triangles")
         self.statusBar().showMessage(f"{verts:,} vertices, {tris:,} triangles")
 
     def _on_load_error(self, msg):
+        self._info_strip.setText("Failed to load model")
         self.statusBar().showMessage(f"Error: {msg}")
 
     # ── Export ──
@@ -855,6 +1115,7 @@ class BrowserWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setStyleSheet(DARK_STYLE)
 
     settings = load_settings()
     game_dir = settings.get("game_dir", "")
