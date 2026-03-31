@@ -89,6 +89,19 @@ def _():
     assert len(mesh.positions) > 100
     assert len(mesh.indices) > 0
 
+@test("Sword 0081 (2-attr accessory mesh): 5 meshes, 1031 verts, no degenerate triangles")
+def _():
+    e = find_entry("cd_phm_01_sword_0081")
+    mesh = load_pac_mesh(e)
+    assert len(mesh.positions) == 1031, f"verts={len(mesh.positions)}"
+    assert len(mesh.indices) // 3 == 1162, f"tris={len(mesh.indices)//3}"
+    # Verify no degenerate triangles (indices spanning whole model)
+    for i in range(0, len(mesh.indices), 3):
+        i0, i1, i2 = mesh.indices[i], mesh.indices[i+1], mesh.indices[i+2]
+        p0, p1, p2 = mesh.positions[i0], mesh.positions[i1], mesh.positions[i2]
+        max_edge = max(np.linalg.norm(p1 - p0), np.linalg.norm(p2 - p1), np.linalg.norm(p0 - p2))
+        assert max_edge < 0.5, f"tri {i//3}: edge={max_edge:.3f} (degenerate)"
+
 
 # ── Index validation ────────────────────────────────────────────────
 
@@ -171,6 +184,11 @@ def _():
     errors = validate_indices("ancientpeople_head_0001")
     assert not errors, errors
 
+@test("Sword 0081 (2-attr): all indices valid")
+def _():
+    errors = validate_indices("cd_phm_01_sword_0081")
+    assert not errors, errors
+
 
 # ── Section size formula ────────────────────────────────────────────
 
@@ -215,6 +233,11 @@ def _():
     exp, act = check_formula("ancientpeople_sho_belt_0002")
     assert exp == act, f"{exp} != {act} (diff={act-exp})"
 
+@test("Sword 0081: formula exact match (with 2-attr)")
+def _():
+    exp, act = check_formula("cd_phm_01_sword_0081")
+    assert exp == act, f"{exp} != {act} (diff={act-exp})"
+
 
 # ── Preview mesh validation ─────────────────────────────────────────
 
@@ -222,7 +245,8 @@ print("\n=== Preview mesh (load_pac_mesh) ===")
 
 @test("No NaN or Inf in positions")
 def _():
-    for name in ["cd_phm_01_sword_0015", "cd_pgw_00_nude_00_0001", "lightningthrower_0001"]:
+    for name in ["cd_phm_01_sword_0015", "cd_pgw_00_nude_00_0001", "lightningthrower_0001",
+                  "cd_phm_01_sword_0081"]:
         e = find_entry(name)
         mesh = load_pac_mesh(e)
         assert not np.any(np.isnan(mesh.positions)), f"{name}: NaN in positions"
@@ -231,7 +255,8 @@ def _():
 @test("All indices within vertex array bounds")
 def _():
     for name in ["cd_phm_01_sword_0015", "cd_pgw_00_nude_00_0001", "lightningthrower_0001",
-                  "cd_m0001_00_bear_ub_0001", "ancientpeople_sho_belt_0002"]:
+                  "cd_m0001_00_bear_ub_0001", "ancientpeople_sho_belt_0002",
+                  "cd_phm_01_sword_0081"]:
         e = find_entry(name)
         mesh = load_pac_mesh(e)
         max_idx = mesh.indices.max()

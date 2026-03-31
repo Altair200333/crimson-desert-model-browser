@@ -120,16 +120,19 @@ def parse_header(data: bytes) -> dict:
     return {'version': version, 'sections': sections}
 
 
-ATTR4_PATTERN = bytes([0x04, 0x00, 0x01, 0x02, 0x03])  # 4-attribute meshes (standard)
-ATTR3_PATTERN = bytes([0x03, 0x00, 0x01, 0x02])         # 3-attribute meshes (cloth/sim)
+ATTR4_PATTERN = bytes([0x04, 0x00, 0x01, 0x02, 0x03])  # 4-attribute meshes (standard, 4 LODs)
+ATTR3_PATTERN = bytes([0x03, 0x00, 0x01, 0x02])         # 3-attribute meshes (cloth/sim, 3 LODs)
+ATTR2_PATTERN = bytes([0x02, 0x00, 0x01])               # 2-attribute meshes (accessories/physics, 2 LODs)
 
 
 def find_mesh_descriptors(data: bytes, sec0_offset: int, sec0_size: int) -> list[MeshDescriptor]:
     """Find all per-mesh descriptors in section 0 by pattern matching.
 
-    Finds both 4-attribute [04 00 01 02 03] and 3-attribute [03 00 01 02]
-    meshes. Returns them sorted by position in section 0 (matching vertex
-    buffer order in geometry sections). 3-attr meshes have 3 LODs only.
+    Finds 4-attribute [04 00 01 02 03], 3-attribute [03 00 01 02], and
+    2-attribute [02 00 01] meshes. Returns them sorted by position in
+    section 0 (matching vertex buffer order in geometry sections).
+
+    Unified layout: vc starts at desc_start+40, ic at desc_start+40+attr_count*2.
     """
     region = data[sec0_offset:sec0_offset + sec0_size]
     found = []  # (offset_in_region, MeshDescriptor)
@@ -181,6 +184,37 @@ def find_mesh_descriptors(data: bytes, sec0_offset: int, sec0_size: int) -> list
                 bbox_unknowns=(floats[0], floats[1]),
             )))
         pos = idx + 4
+
+    # Find 2-attribute descriptors (accessories/physics meshes, 2 LODs)
+    pos = 0
+    while True:
+        idx = region.find(ATTR2_PATTERN, pos)
+        if idx == -1:
+            break
+        desc_start = idx - 35
+        if desc_start >= 0 and region[desc_start] == 0x01:
+            # Skip false positives inside 3-attr or 4-attr patterns
+            if idx >= 1 and region[idx - 1] in (0x03, 0x04):
+                pos = idx + 3
+                continue
+            floats = struct.unpack_from('<8f', region, desc_start + 3)
+            vc2 = [struct.unpack_from('<H', region, desc_start + 40 + i * 2)[0] for i in range(2)]
+            ic2 = [struct.unpack_from('<I', region, desc_start + 44 + i * 4)[0] for i in range(2)]
+            # Sanity check: reject if counts look unreasonable (false positive)
+            if vc2[0] > 50000 or ic2[0] > 500000:
+                pos = idx + 3
+                continue
+            vc = vc2 + [0, 0]  # pad to 4 LODs
+            ic = ic2 + [0, 0]
+            names = _find_name_strings(region, desc_start)
+            found.append((desc_start, MeshDescriptor(
+                display_name=names[0], material_name=names[1],
+                center=(floats[2], floats[3], floats[4]),
+                half_extent=(floats[5], floats[6], floats[7]),
+                vertex_counts=vc, index_counts=ic,
+                bbox_unknowns=(floats[0], floats[1]),
+            )))
+        pos = idx + 3
 
     # Sort by position in section 0 to match vertex buffer order
     found.sort(key=lambda x: x[0])
