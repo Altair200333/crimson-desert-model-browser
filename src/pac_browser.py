@@ -36,18 +36,19 @@ from pam_export import (
     detect_vertex_stride, decode_pam_vertices, decode_pam_indices,
     export_pam,
 )
+from item_db import build_item_index, ItemIndex, ItemRecord
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QSplitter, QStackedWidget, QWidget,
     QVBoxLayout, QHBoxLayout, QLineEdit, QListView,
     QPushButton, QLabel, QFileDialog, QMenuBar, QMessageBox, QComboBox,
-    QStyledItemDelegate,
+    QStyledItemDelegate, QStyle,
 )
 from PySide6.QtCore import (
     Qt, QThread, Signal, QSize, QTimer,
     QAbstractListModel, QModelIndex,
 )
-from PySide6.QtGui import QSurfaceFormat, QAction, QFont
+from PySide6.QtGui import QSurfaceFormat, QAction, QFont, QColor
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL.GL import *
 
@@ -406,6 +407,23 @@ class TrigramIndex:
 # ── Virtual list model ─────────────────────────────────────────────
 
 _SEPARATOR_SENTINEL = object()  # unique marker for separator rows
+_ITEM_SECTION = object()        # "ITEMS" section header
+_MODEL_SECTION = object()       # "MODELS" section header
+
+
+@dataclass
+class _ItemHeaderRow:
+    """Item name row in search results."""
+    display_name: str
+    internal_name: str
+    pac_files: list  # list of pac filename strings
+
+
+@dataclass
+class _ItemChildRow:
+    """PAC file shown as child of an item header."""
+    catalog_entry: CatalogEntry  # the actual model entry
+    is_last: bool                # for tree glyph rendering
 
 
 class CatalogModel(QAbstractListModel):
@@ -420,6 +438,7 @@ class CatalogModel(QAbstractListModel):
         self._all_rows = []   # full result set
         self._rows = []       # currently visible subset (lazy-loaded pages)
         self._show_tags = True
+        self._pac_lookup: dict[str, CatalogEntry] = {}  # pac filename → entry
 
     _PAGE_SIZE = 500  # rows loaded per page
 
@@ -439,6 +458,36 @@ class CatalogModel(QAbstractListModel):
         self.beginResetModel()
         self._show_tags = show_tags
         self._all_rows = list(items)
+        self._rows = self._all_rows[:self._PAGE_SIZE]
+        self.endResetModel()
+
+    def set_search_results(self, item_rows: list[_ItemHeaderRow],
+                           model_exact: list, model_fuzzy: list,
+                           show_tags: bool = True):
+        """Set combined item + model search results."""
+        self.beginResetModel()
+        self._show_tags = show_tags
+        self._all_rows = []
+
+        if item_rows:
+            self._all_rows.append(_ITEM_SECTION)
+            for header in item_rows:
+                self._all_rows.append(header)
+                for i, pac_name in enumerate(header.pac_files):
+                    entry = self._pac_lookup.get(pac_name)
+                    if entry:
+                        self._all_rows.append(_ItemChildRow(
+                            catalog_entry=entry,
+                            is_last=(i == len(header.pac_files) - 1)))
+
+        if model_exact or model_fuzzy:
+            if item_rows:
+                self._all_rows.append(_MODEL_SECTION)
+            self._all_rows.extend(model_exact)
+            if model_exact and model_fuzzy:
+                self._all_rows.append(_SEPARATOR_SENTINEL)
+            self._all_rows.extend(model_fuzzy)
+
         self._rows = self._all_rows[:self._PAGE_SIZE]
         self.endResetModel()
 
@@ -462,10 +511,33 @@ class CatalogModel(QAbstractListModel):
         if not index.isValid():
             return None
         item = self._rows[index.row()]
+
+        # Sentinel rows
         if item is _SEPARATOR_SENTINEL:
+            return "\u2500  closest matches  \u2500" if role == Qt.ItemDataRole.DisplayRole else None
+        if item is _ITEM_SECTION:
+            return "ITEMS" if role == Qt.ItemDataRole.DisplayRole else None
+        if item is _MODEL_SECTION:
+            return "MODELS" if role == Qt.ItemDataRole.DisplayRole else None
+
+        # Item header row
+        if isinstance(item, _ItemHeaderRow):
             if role == Qt.ItemDataRole.DisplayRole:
-                return "\u2500\u2500  closest matches  \u2500\u2500"
+                return f"  {item.display_name}  ({item.internal_name})"
+            if role == Qt.ItemDataRole.UserRole:
+                return item
             return None
+
+        # Item child row (PAC file under an item)
+        if isinstance(item, _ItemChildRow):
+            if role == Qt.ItemDataRole.DisplayRole:
+                glyph = "\u2514\u2500 " if item.is_last else "\u251c\u2500 "
+                return f"      {glyph}{item.catalog_entry.display_name}"
+            if role == Qt.ItemDataRole.UserRole:
+                return item.catalog_entry
+            return None
+
+        # Standard CatalogEntry
         if role == Qt.ItemDataRole.DisplayRole:
             if self._show_tags:
                 tag = "PAC" if item.file_type == "pac" else "PAM"
@@ -479,24 +551,48 @@ class CatalogModel(QAbstractListModel):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
         item = self._rows[index.row()]
-        if item is _SEPARATOR_SENTINEL:
-            return Qt.ItemFlag.NoItemFlags  # not selectable
+        if item in (_SEPARATOR_SENTINEL, _ITEM_SECTION, _MODEL_SECTION):
+            return Qt.ItemFlag.NoItemFlags
+        if isinstance(item, _ItemHeaderRow):
+            return Qt.ItemFlag.ItemIsEnabled  # clickable, previews first PAC
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
 
 class SeparatorDelegate(QStyledItemDelegate):
-    """Custom delegate that renders separator rows with a distinct style."""
+    """Custom delegate for separator, section header, and item rows."""
+
+    def _draw_section(self, painter, option, text, color_hex="#b0a060"):
+        """Draw a section header row (ITEMS / MODELS)."""
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(option.palette.base())
+        painter.drawRect(option.rect)
+        from PySide6.QtGui import QColor
+        painter.setPen(QColor(color_hex))
+        font = QFont(option.font)
+        font.setPointSize(font.pointSize() - 1)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(option.rect.adjusted(8, 0, 0, 0),
+                         Qt.AlignmentFlag.AlignVCenter, text)
+        painter.restore()
 
     def paint(self, painter, option, index):
         item = index.model()._rows[index.row()] if index.isValid() else None
+
+        if item is _ITEM_SECTION:
+            self._draw_section(painter, option, "\u25c6  ITEMS", "#c0a050")
+            return
+        if item is _MODEL_SECTION:
+            self._draw_section(painter, option, "\u25c6  MODELS", "#7090b0")
+            return
         if item is _SEPARATOR_SENTINEL:
             painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(option.palette.base())
             painter.drawRect(option.rect)
             painter.setPen(option.palette.color(option.palette.ColorRole.PlaceholderText))
-            from PySide6.QtGui import QFont as _QFont
-            font = _QFont(option.font)
+            font = QFont(option.font)
             font.setPointSize(font.pointSize() - 1)
             font.setItalic(True)
             painter.setFont(font)
@@ -504,11 +600,51 @@ class SeparatorDelegate(QStyledItemDelegate):
                              Qt.AlignmentFlag.AlignVCenter, "\u2500  closest matches  \u2500")
             painter.restore()
             return
+        if isinstance(item, _ItemHeaderRow):
+            painter.save()
+            # Draw selection/hover background
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(option.rect, option.palette.highlight())
+            else:
+                painter.fillRect(option.rect, option.palette.base())
+
+            font = QFont(option.font)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QColor("#e0d0a0"))
+            r = option.rect.adjusted(12, 0, 0, 0)
+            painter.drawText(r, Qt.AlignmentFlag.AlignVCenter, item.display_name)
+            # Draw internal name in dim
+            fm = painter.fontMetrics()
+            name_w = fm.horizontalAdvance(item.display_name + "  ")
+            font.setBold(False)
+            font.setPointSize(font.pointSize() - 1)
+            painter.setFont(font)
+            painter.setPen(QColor("#808080"))
+            painter.drawText(r.adjusted(name_w, 0, 0, 0),
+                             Qt.AlignmentFlag.AlignVCenter, item.internal_name)
+            painter.restore()
+            return
+        if isinstance(item, _ItemChildRow):
+            painter.save()
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(option.rect, option.palette.highlight())
+            else:
+                painter.fillRect(option.rect, option.palette.base())
+
+            glyph = "\u2514\u2500 " if item.is_last else "\u251c\u2500 "
+            painter.setPen(QColor("#909090"))
+            painter.drawText(option.rect.adjusted(24, 0, 0, 0),
+                             Qt.AlignmentFlag.AlignVCenter,
+                             f"{glyph}{item.catalog_entry.display_name}")
+            painter.restore()
+            return
+
         super().paint(painter, option, index)
 
     def sizeHint(self, option, index):
         item = index.model()._rows[index.row()] if index.isValid() else None
-        if item is _SEPARATOR_SENTINEL:
+        if item in (_SEPARATOR_SENTINEL, _ITEM_SECTION, _MODEL_SECTION):
             return QSize(option.rect.width(), 24)
         return super().sizeHint(option, index)
 
@@ -1173,7 +1309,7 @@ class ModelViewer(QOpenGLWidget):
 # ── Background workers ──────────────────────────────────────────────
 
 class CatalogWorker(QThread):
-    catalog_ready = Signal(list, list)  # (catalog, all_pamt_entries)
+    catalog_ready = Signal(list, list, object)  # (catalog, all_pamt_entries, item_index)
     progress = Signal(str)
     failed = Signal(str)
 
@@ -1185,7 +1321,13 @@ class CatalogWorker(QThread):
         try:
             catalog, all_entries = build_catalog(self._game_dir,
                                                  progress_fn=self.progress.emit)
-            self.catalog_ready.emit(catalog, all_entries)
+            # Build item index in same thread — available immediately
+            try:
+                item_index = build_item_index(self._game_dir, all_entries,
+                                              progress_fn=self.progress.emit)
+            except Exception:
+                item_index = None  # non-fatal — app works without item search
+            self.catalog_ready.emit(catalog, all_entries, item_index)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -1308,6 +1450,10 @@ class BrowserWindow(QMainWindow):
         self._all_entries: list[PazEntry] = []  # cached PAMT for fast texture export
         self._filtered: list[CatalogEntry] = []
         self._trigram_index: TrigramIndex | None = None
+        self._item_index: ItemIndex | None = None
+        self._item_trigram: TrigramIndex | None = None
+        self._item_search_entries: list = []
+        self._pac_lookup: dict[str, CatalogEntry] = {}
         self._load_worker: LoadWorker | None = None
         self._export_worker: ExportWorker | None = None
         self._current_entry: CatalogEntry | None = None
@@ -1415,22 +1561,48 @@ class BrowserWindow(QMainWindow):
         self._cat_worker.failed.connect(self._on_catalog_failed)
         self._cat_worker.start()
 
-    def _on_catalog_ready(self, catalog, all_entries):
+    def _on_catalog_ready(self, catalog, all_entries, item_index):
         self._catalog = catalog
         self._all_entries = all_entries
         self._category_subset = catalog
         self._trigram_index = TrigramIndex(catalog)
         self._filtered = catalog
+
+        # Item search index
+        self._item_index = item_index
+        self._pac_lookup = {e.filename: e for e in catalog}
+        self._list_model._pac_lookup = self._pac_lookup
+
+        # Build item name trigram index for fast search
+        if item_index and item_index.items:
+            self._item_search_entries = []
+            for rec in item_index.items:
+                key = f"{rec.display_name} {rec.internal_name}".lower()
+                self._item_search_entries.append(
+                    CatalogEntry(filename="", display_name=rec.display_name,
+                                 paz_entry=None, search_key=key,
+                                 file_type="item", category=""))
+            # Attach record references for lookup
+            for entry, rec in zip(self._item_search_entries, item_index.items):
+                entry._item_record = rec
+            self._item_trigram = TrigramIndex(self._item_search_entries)
+        else:
+            self._item_search_entries = []
+            self._item_trigram = None
+
         self._list_model.set_items(catalog, show_tags=True)
         pac_count = sum(1 for e in catalog if e.file_type == "pac")
         pam_count = sum(1 for e in catalog if e.file_type == "pam")
+        item_count = len(item_index.items) if item_index else 0
         self._count_label.setText(f"{len(catalog):,} models")
         self._search.setEnabled(True)
         self._category_filter.setEnabled(True)
         self._search.setFocus()
         self._right_stack.setCurrentIndex(1)
-        self.statusBar().showMessage(
-            f"Loaded {pac_count:,} PAC + {pam_count:,} PAM = {len(catalog):,} models")
+        msg = f"Loaded {pac_count:,} PAC + {pam_count:,} PAM = {len(catalog):,} models"
+        if item_count:
+            msg += f" + {item_count:,} items"
+        self.statusBar().showMessage(msg)
 
     def _on_catalog_failed(self, msg):
         self._loading_label.setText(f"Failed to load catalog:\n{msg}")
@@ -1458,7 +1630,27 @@ class BrowserWindow(QMainWindow):
 
         if key:
             terms = key.split()
-            # Fast substring matching via trigram index
+
+            # Search item names (display name + internal name)
+            item_rows = []
+            if self._item_trigram and len(key) >= 3:
+                item_hits = self._item_trigram.multi_term_matches(terms)
+                # Score by relevance: prefer items with PAC files, shorter names
+                scored = []
+                for entry in item_hits:
+                    rec = getattr(entry, '_item_record', None)
+                    if rec and rec.pac_files:
+                        # Lower score = better: items with models rank higher,
+                        # shorter names rank higher (more specific match)
+                        scored.append((len(rec.display_name), rec))
+                scored.sort(key=lambda x: x[0])
+                for _, rec in scored[:20]:
+                    item_rows.append(_ItemHeaderRow(
+                        display_name=rec.display_name,
+                        internal_name=rec.internal_name,
+                        pac_files=rec.pac_files))
+
+            # Fast substring matching on model filenames via trigram index
             exact = idx.multi_term_matches(terms) if idx else [
                 e for e in subset if all(t in e.search_key for t in terms)]
 
@@ -1477,7 +1669,12 @@ class BrowserWindow(QMainWindow):
 
             count = len(exact) + len(fuzzy_entries)
             self._filtered = exact + fuzzy_entries
-            self._list_model.set_results(exact, fuzzy_entries, show_tags=show_tags)
+
+            if item_rows:
+                self._list_model.set_search_results(
+                    item_rows, exact, fuzzy_entries, show_tags=show_tags)
+            else:
+                self._list_model.set_results(exact, fuzzy_entries, show_tags=show_tags)
         else:
             self._filtered = subset
             count = len(subset)
@@ -1518,6 +1715,17 @@ class BrowserWindow(QMainWindow):
             return
         entry = self._list_model.data(index, Qt.ItemDataRole.UserRole)
         if entry is None:
+            return
+        # Item header click — preview first PAC file
+        if isinstance(entry, _ItemHeaderRow):
+            if entry.pac_files:
+                cat_entry = self._pac_lookup.get(entry.pac_files[0])
+                if cat_entry:
+                    self._current_entry = cat_entry
+                    self._export_action.setEnabled(True)
+                    self._load_model(cat_entry)
+                    self._info_strip.setText(
+                        f"{entry.display_name}  ({len(entry.pac_files)} model files)")
             return
         self._current_entry = entry
         self._export_action.setEnabled(True)

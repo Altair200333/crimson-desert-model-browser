@@ -78,6 +78,8 @@ Search the model or select it, then click File -> Export to export as obj file w
   <img src="screenshots/app_1.jpg" height="300">
   <img src="screenshots/blend_1.jpg" height="300">
 </p>
+<img src="screenshots/app_2.jpg" height="300">
+
 
 ### Command-line Export
 
