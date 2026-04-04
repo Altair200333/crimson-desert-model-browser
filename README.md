@@ -1,5 +1,7 @@
 # Crimson Desert Model Browser
 
+**Crimson Desert Modding Community:** [Join Discord](https://discord.gg/CRPCBAPY5b)
+
 ### Export models from Crimson Desert to Blender
 
 A desktop tool for browsing, previewing, and exporting 3D models from Crimson Desert game archives.
