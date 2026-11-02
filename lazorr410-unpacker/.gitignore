@@ -1,0 +1,12 @@
+*.xml
+
+scripts/
+output/
+
+**/bin
+**/obj
+publish/
+build/
+decrypt_info/
+
+__pycache__

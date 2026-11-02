@@ -185,6 +185,7 @@ class BrowserWindow(QMainWindow):
         self._char_index: CharacterIndex | None = None
         self._char_trigram: TrigramIndex | None = None
         self._char_search_entries: list = []
+        self._all_item_rows: list[_ItemHeaderRow] = []
         self._pac_lookup: dict[str, CatalogEntry] = {}
         self._load_worker: LoadWorker | None = None
         self._export_worker: ExportWorker | None = None
@@ -242,11 +243,23 @@ class BrowserWindow(QMainWindow):
         layout = QVBoxLayout(left)
         layout.setContentsMargins(8, 8, 4, 8)
         layout.setSpacing(6)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
         self._category_filter = QComboBox()
-        self._category_filter.addItems(["All", "Characters", "Objects", "Effects", "Terrain"])
+        self._category_filter.addItems(["All", "Items", "Characters", "Objects", "Effects", "Terrain"])
         self._category_filter.setEnabled(False)
         self._category_filter.currentTextChanged.connect(self._on_category_changed)
-        layout.addWidget(self._category_filter)
+        filter_row.addWidget(self._category_filter, 1)
+
+        self._source_filter = QComboBox()
+        self._source_filter.addItems(["All Content", "Base Game", "DLC"])
+        self._source_filter.setEnabled(False)
+        self._source_filter.currentTextChanged.connect(self._on_source_changed)
+        filter_row.addWidget(self._source_filter, 1)
+
+        layout.addLayout(filter_row)
+
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search models...")
         self._search.setClearButtonEnabled(True)
@@ -329,8 +342,17 @@ class BrowserWindow(QMainWindow):
         self._pac_lookup = {e.filename: e for e in catalog}
         self._list_model.set_pac_lookup(self._pac_lookup)
 
-        # Build item name trigram index for fast search
+        # Build all item rows (with is_dlc flag) and trigram index
         if item_index and item_index.items:
+            self._all_item_rows = []
+            for rec in item_index.items:
+                is_dlc = any(getattr(self._pac_lookup.get(pf), 'is_dlc', False) for pf in rec.pac_files)
+                self._all_item_rows.append(_ItemHeaderRow(
+                    display_name=rec.display_name,
+                    internal_name=rec.internal_name,
+                    pac_files=rec.pac_files,
+                    is_dlc=is_dlc,
+                ))
             self._item_search_entries = [
                 ItemSearchEntry(
                     search_key=f"{rec.display_name} {rec.internal_name}".lower(),
@@ -340,6 +362,7 @@ class BrowserWindow(QMainWindow):
             ]
             self._item_trigram = TrigramIndex(self._item_search_entries)
         else:
+            self._all_item_rows = []
             self._item_search_entries = []
             self._item_trigram = None
 
@@ -364,6 +387,7 @@ class BrowserWindow(QMainWindow):
         self._count_label.setText(f"{len(catalog):,} models")
         self._search.setEnabled(True)
         self._category_filter.setEnabled(True)
+        self._source_filter.setEnabled(True)
         self._search.setFocus()
         self._right_stack.setCurrentIndex(1)
         msg = f"Loaded {pac_count:,} PAC + {pam_count:,} PAM = {len(catalog):,} models"
@@ -380,11 +404,22 @@ class BrowserWindow(QMainWindow):
     def _on_category_changed(self, _=None):
         """Rebuild category subset, trigram index, and re-apply text filter."""
         category = self._category_filter.currentText().lower()
+        if category == "items":
+            self._search.setPlaceholderText("Search items...")
+        else:
+            self._search.setPlaceholderText("Search models...")
+
         if category == "all":
             self._category_subset = self._catalog
-        else:
+        elif category != "items":
             self._category_subset = [e for e in self._catalog if e.category == category]
-        self._trigram_index = TrigramIndex(self._category_subset)
+        else:
+            self._category_subset = []
+        self._trigram_index = TrigramIndex(self._category_subset) if self._category_subset else None
+        self._apply_filters()
+
+    def _on_source_changed(self, _=None):
+        """Re-apply filters when DLC/Base Game source filter changes."""
         self._apply_filters()
 
     def _on_search_text_changed(self, _=None):
@@ -392,15 +427,40 @@ class BrowserWindow(QMainWindow):
         self._apply_filters()
 
     def _apply_filters(self):
+        category = self._category_filter.currentText().lower()
+        source = self._source_filter.currentText()  # "All Content", "Base Game", "DLC"
         key = self._search.text().strip().lower()
+
+        # Handle Items category separately
+        if category == "items":
+            items = self._all_item_rows
+            if source == "Base Game":
+                items = [it for it in items if not it.is_dlc]
+            elif source == "DLC":
+                items = [it for it in items if it.is_dlc]
+
+            if key:
+                terms = key.split()
+                items = [it for it in items if all(t in (it.display_name + " " + it.internal_name).lower() for t in terms)]
+
+            self._list_model.set_item_rows(items, show_tags=False)
+            self._is_filtered = bool(key) or source != "All Content" or category != "all"
+            self._update_count_label()
+            return
+
+        # Model categories (All, Characters, Objects, Effects, Terrain)
         show_tags = self._category_filter.currentText() == "All"
         subset = self._category_subset
-        idx = self._trigram_index
+
+        if source == "Base Game":
+            subset = [e for e in subset if not e.is_dlc]
+        elif source == "DLC":
+            subset = [e for e in subset if e.is_dlc]
+
+        idx = TrigramIndex(subset) if subset else None
 
         if key:
             terms = key.split()
-            category = self._category_filter.currentText().lower()
-            # Character/item groups only shown for "all" or "characters" categories
             show_grouped = category in ("all", "characters")
 
             # Search character appearances (app.xml)
@@ -411,13 +471,19 @@ class BrowserWindow(QMainWindow):
                 for entry in char_hits:
                     rec = entry.record
                     if rec and rec.pac_files:
-                        scored.append((len(rec.app_name), rec))
+                        is_dlc = any(getattr(self._pac_lookup.get(pf), 'is_dlc', False) for pf in rec.pac_files)
+                        if source == "Base Game" and is_dlc:
+                            continue
+                        if source == "DLC" and not is_dlc:
+                            continue
+                        scored.append((len(rec.app_name), rec, is_dlc))
                 scored.sort(key=lambda x: x[0])
-                for _, rec in scored:
+                for _, rec, is_dlc in scored:
                     char_rows.append(_CharHeaderRow(
                         display_label=rec.display_label,
                         app_name=rec.app_name,
-                        pac_files=rec.pac_files))
+                        pac_files=rec.pac_files,
+                        is_dlc=is_dlc))
 
             # Search item names (display name + internal name)
             item_rows = []
@@ -427,13 +493,19 @@ class BrowserWindow(QMainWindow):
                 for entry in item_hits:
                     rec = entry.record if isinstance(entry, ItemSearchEntry) else None
                     if rec and rec.pac_files:
-                        scored.append((len(rec.display_name), rec))
+                        is_dlc = any(getattr(self._pac_lookup.get(pf), 'is_dlc', False) for pf in rec.pac_files)
+                        if source == "Base Game" and is_dlc:
+                            continue
+                        if source == "DLC" and not is_dlc:
+                            continue
+                        scored.append((len(rec.display_name), rec, is_dlc))
                 scored.sort(key=lambda x: x[0])
-                for _, rec in scored:
+                for _, rec, is_dlc in scored:
                     item_rows.append(_ItemHeaderRow(
                         display_name=rec.display_name,
                         internal_name=rec.internal_name,
-                        pac_files=rec.pac_files))
+                        pac_files=rec.pac_files,
+                        is_dlc=is_dlc))
 
             # Fast substring matching on model filenames via trigram index
             exact = idx.multi_term_matches(terms) if idx else [
@@ -462,7 +534,7 @@ class BrowserWindow(QMainWindow):
         else:
             self._list_model.set_items(subset, show_tags=show_tags)
 
-        self._is_filtered = bool(key) or self._category_filter.currentText() != "All"
+        self._is_filtered = bool(key) or self._category_filter.currentText() != "All" or source != "All Content"
         self._update_count_label()
 
     def _update_count_label(self):
@@ -470,11 +542,17 @@ class BrowserWindow(QMainWindow):
         count = self._list_model.match_count()
         displayed = self._list_model.rowCount()
         total_rows = self._list_model.total_row_count()
-        word = "matches" if self._is_filtered else "models"
+        cat = self._category_filter.currentText().lower()
+        if cat == "items":
+            word = "items"
+        else:
+            word = "matches" if self._is_filtered else "models"
         if displayed < total_rows:
             label = f"{count:,} {word} (showing {displayed:,})"
         else:
             label = f"{count:,} {word}"
+        self._count_label.setText(label)
+        self.statusBar().showMessage(label)
         self._count_label.setText(label)
         self.statusBar().showMessage(label)
 

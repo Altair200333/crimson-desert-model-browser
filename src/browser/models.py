@@ -11,6 +11,7 @@ class CatalogEntry:
     search_key: str
     file_type: str = "pac"        # "pac" or "pam"
     category: str = "characters"  # "characters", "objects", "effects", "terrain"
+    is_dlc: bool = False
 
 
 @dataclass
@@ -73,6 +74,7 @@ class _ItemHeaderRow:
     display_name: str
     internal_name: str
     pac_files: list  # list of pac filename strings
+    is_dlc: bool = False
 
 
 @dataclass
@@ -88,6 +90,7 @@ class _CharHeaderRow:
     display_label: str   # e.g. "macduff" or "bear"
     app_name: str        # e.g. "cd_phm_macduff_00000"
     pac_files: list      # list of pac filename strings
+    is_dlc: bool = False
 
 
 def fuzzy_match(query: str, target: str) -> tuple[bool, int]:

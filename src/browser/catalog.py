@@ -31,40 +31,53 @@ def build_catalog(game_dir: str, progress_fn=None) -> tuple[list[CatalogEntry], 
     catalog = []
     all_entries = []
 
-    for dir_name, (category, extensions) in DIR_CONFIG.items():
-        sub_dir = os.path.join(game_dir, dir_name)
-        pamt_path = os.path.join(sub_dir, "0.pamt")
-        if not os.path.isfile(pamt_path):
-            continue
+    scan_dirs = [(game_dir, "")]
+    dlc_root = os.path.join(game_dir, "dlc")
+    if os.path.isdir(dlc_root):
+        for item in sorted(os.listdir(dlc_root)):
+            item_path = os.path.join(dlc_root, item)
+            if os.path.isdir(item_path):
+                scan_dirs.append((item_path, f" ({item})"))
 
-        if progress_fn:
-            progress_fn(f"Parsing {dir_name} ({category})...")
-
-        entries = parse_pamt(pamt_path, paz_dir=sub_dir)
-
-        # Cache mesh, texture, prefab, appearance, and pac.xml entries
-        useful_exts = extensions | {".dds", ".prefab", ".pac.xml", ".app.xml"}
-        for e in entries:
-            lower = e.path.lower()
-            if any(lower.endswith(ext) for ext in useful_exts):
-                all_entries.append(e)
-
-        # Build catalog entries for mesh files
-        file_type = "pac" if ".pac" in extensions else "pam"
-        for e in entries:
-            lower = e.path.lower()
-            if not any(lower.endswith(ext) for ext in extensions):
-                continue
-            if e.compressed and e.compression_type not in (0, 1):
+    for base_dir, label in scan_dirs:
+        for dir_name, (category, extensions) in DIR_CONFIG.items():
+            sub_dir = os.path.join(base_dir, dir_name)
+            pamt_path = os.path.join(sub_dir, "0.pamt")
+            if not os.path.isfile(pamt_path):
                 continue
 
-            fname = os.path.basename(e.path)
-            stem = os.path.splitext(fname)[0]
-            catalog.append(CatalogEntry(
-                filename=fname, display_name=stem,
-                paz_entry=e, search_key=stem.lower(),
-                file_type=file_type, category=category,
-            ))
+            if progress_fn:
+                progress_fn(f"Parsing {dir_name}{label} ({category})...")
+
+            entries = parse_pamt(pamt_path, paz_dir=sub_dir)
+
+            # Cache mesh, texture, prefab, appearance, and pac.xml entries
+            useful_exts = extensions | {".dds", ".prefab", ".pac.xml", ".app.xml"}
+            for e in entries:
+                lower = e.path.lower()
+                if any(lower.endswith(ext) for ext in useful_exts):
+                    all_entries.append(e)
+
+            # Build catalog entries for mesh files
+            file_type = "pac" if ".pac" in extensions else "pam"
+            for e in entries:
+                lower = e.path.lower()
+                if not any(lower.endswith(ext) for ext in extensions):
+                    continue
+                if e.compressed and e.compression_type not in (0, 1):
+                    continue
+
+                fname = os.path.basename(e.path)
+                stem = os.path.splitext(fname)[0]
+                skey = stem.lower()
+                if "damian" in skey or skey.startswith("cd_phw_") or skey.startswith("phw_"):
+                    skey += " damiane damian phw"
+                catalog.append(CatalogEntry(
+                    filename=fname, display_name=stem,
+                    paz_entry=e, search_key=skey,
+                    file_type=file_type, category=category,
+                    is_dlc=bool(label),
+                ))
 
     catalog.sort(key=lambda c: c.display_name.lower())
     return catalog, all_entries
@@ -108,6 +121,22 @@ class CatalogModel(QAbstractListModel):
         self._show_tags = show_tags
         self._match_count = len(items)
         self._all_rows = list(items)
+        self._rows = self._all_rows[:self._PAGE_SIZE]
+        self.endResetModel()
+
+    def set_item_rows(self, item_rows: list[_ItemHeaderRow], show_tags: bool = True):
+        """Set item list with resolved PAC child rows."""
+        self.beginResetModel()
+        self._show_tags = show_tags
+        self._all_rows = []
+        hits = 0
+        for header in item_rows:
+            children = self._resolve_pac_children(header.pac_files)
+            if children:
+                hits += 1
+                self._all_rows.append(header)
+                self._all_rows.extend(children)
+        self._match_count = hits
         self._rows = self._all_rows[:self._PAGE_SIZE]
         self.endResetModel()
 
@@ -221,7 +250,8 @@ class CatalogModel(QAbstractListModel):
         # Item header row
         if isinstance(item, _ItemHeaderRow):
             if role == Qt.ItemDataRole.DisplayRole:
-                return f"  {item.display_name}  ({item.internal_name})"
+                dlc_tag = "  [DLC]" if item.is_dlc else ""
+                return f"  {item.display_name}  ({item.internal_name}){dlc_tag}"
             if role == Qt.ItemDataRole.UserRole:
                 return item
             return None
@@ -229,7 +259,8 @@ class CatalogModel(QAbstractListModel):
         # Character header row
         if isinstance(item, _CharHeaderRow):
             if role == Qt.ItemDataRole.DisplayRole:
-                return f"  {item.display_label}  ({item.app_name})"
+                dlc_tag = "  [DLC]" if item.is_dlc else ""
+                return f"  {item.display_label}  ({item.app_name}){dlc_tag}"
             if role == Qt.ItemDataRole.UserRole:
                 return item
             return None
@@ -238,17 +269,19 @@ class CatalogModel(QAbstractListModel):
         if isinstance(item, _ItemChildRow):
             if role == Qt.ItemDataRole.DisplayRole:
                 glyph = "\u2514\u2500 " if item.is_last else "\u251c\u2500 "
-                return f"      {glyph}{item.catalog_entry.display_name}"
+                dlc_tag = "  [DLC]" if item.catalog_entry.is_dlc else ""
+                return f"      {glyph}{item.catalog_entry.display_name}{dlc_tag}"
             if role == Qt.ItemDataRole.UserRole:
                 return item.catalog_entry
             return None
 
         # Standard CatalogEntry
         if role == Qt.ItemDataRole.DisplayRole:
+            dlc_tag = "  [DLC]" if item.is_dlc else ""
             if self._show_tags:
                 tag = "PAC" if item.file_type == "pac" else "PAM"
-                return f"{item.display_name}  [{tag}]"
-            return item.display_name
+                return f"{item.display_name}  [{tag}]{dlc_tag}"
+            return f"{item.display_name}{dlc_tag}" if dlc_tag else item.display_name
         if role == Qt.ItemDataRole.UserRole:
             return item
         return None
@@ -329,8 +362,9 @@ class SeparatorDelegate(QStyledItemDelegate):
             font.setPointSize(font.pointSize() - 1)
             painter.setFont(font)
             painter.setPen(QColor("#808080"))
+            tag_text = item.internal_name + ("  [DLC]" if item.is_dlc else "")
             painter.drawText(r.adjusted(name_w, 0, 0, 0),
-                             Qt.AlignmentFlag.AlignVCenter, item.internal_name)
+                             Qt.AlignmentFlag.AlignVCenter, tag_text)
             painter.restore()
             return
         if isinstance(item, _CharHeaderRow):
@@ -352,8 +386,9 @@ class SeparatorDelegate(QStyledItemDelegate):
             font.setPointSize(font.pointSize() - 1)
             painter.setFont(font)
             painter.setPen(QColor("#808080"))
+            tag_text = item.app_name + ("  [DLC]" if item.is_dlc else "")
             painter.drawText(r.adjusted(name_w, 0, 0, 0),
-                             Qt.AlignmentFlag.AlignVCenter, item.app_name)
+                             Qt.AlignmentFlag.AlignVCenter, tag_text)
             painter.restore()
             return
         if isinstance(item, _ItemChildRow):
@@ -364,10 +399,11 @@ class SeparatorDelegate(QStyledItemDelegate):
                 painter.fillRect(option.rect, option.palette.base())
 
             glyph = "\u2514\u2500 " if item.is_last else "\u251c\u2500 "
+            dlc_tag = "  [DLC]" if item.catalog_entry.is_dlc else ""
             painter.setPen(QColor("#909090"))
             painter.drawText(option.rect.adjusted(24, 0, 0, 0),
                              Qt.AlignmentFlag.AlignVCenter,
-                             f"{glyph}{item.catalog_entry.display_name}")
+                             f"{glyph}{item.catalog_entry.display_name}{dlc_tag}")
             painter.restore()
             return
 

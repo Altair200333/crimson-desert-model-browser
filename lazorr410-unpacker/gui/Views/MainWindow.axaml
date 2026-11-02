@@ -1,0 +1,63 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:PazGui.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="600"
+        x:Class="PazGui.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="PAZ Unpacker"
+        Width="900" Height="600">
+
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <DockPanel>
+        <!-- Toolbar -->
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8" Spacing="8">
+            <Button x:Name="OpenFolderButton" Content="Open Folder" Click="OnOpenFolder"/>
+            <Button x:Name="ExtractAllButton" Content="Extract All" Click="OnExtractAll"
+                    IsEnabled="{Binding CanExtract}"/>
+            <Button x:Name="ExtractSelectedButton" Content="Extract Selected" Click="OnExtractSelected"
+                    IsEnabled="{Binding CanExtract}"/>
+            <Button x:Name="ExtractResultsButton" Content="Extract Results" Click="OnExtractResults"
+                    IsEnabled="{Binding HasSearchFilter}"/>
+            <Button x:Name="DumpFileListButton" Content="Dump File List" Click="OnDumpFileList"
+                    IsEnabled="{Binding CanExtract}"/>
+            <TextBox Text="{Binding SearchText}" Watermark="Search files..."
+                     Width="250" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Status bar -->
+        <StackPanel DockPanel.Dock="Bottom" Margin="8,4">
+            <ProgressBar Value="{Binding ProgressValue}" Maximum="{Binding ProgressMax}"
+                         IsVisible="{Binding IsExtracting}" Height="4" Margin="0,0,0,4"/>
+            <TextBlock Text="{Binding StatusText}" FontSize="12" Foreground="Gray"/>
+        </StackPanel>
+
+        <!-- Detail panel -->
+        <Border DockPanel.Dock="Bottom" BorderBrush="Gray" BorderThickness="0,1,0,0"
+                Padding="8" MinHeight="80">
+            <TextBlock Text="{Binding DetailText}" FontFamily="Consolas, Courier New, monospace"
+                       FontSize="12" TextWrapping="Wrap"/>
+        </Border>
+
+        <!-- Tree view -->
+        <TreeView x:Name="FileTree" ItemsSource="{Binding TreeRoots}" SelectedItem="{Binding SelectedNode}"
+                  Margin="8,0,8,4">
+            <TreeView.ItemTemplate>
+                <TreeDataTemplate ItemsSource="{Binding Children}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="{Binding Name}" MinWidth="300"/>
+                        <TextBlock Text="{Binding TypeDisplay}" Width="100" Foreground="Gray"/>
+                        <TextBlock Text="{Binding SizeDisplay}" Width="80" Foreground="Gray"
+                                   TextAlignment="Right"/>
+                        <TextBlock Text="{Binding SourceDisplay}" Width="160" Foreground="Gray"/>
+                    </StackPanel>
+                </TreeDataTemplate>
+            </TreeView.ItemTemplate>
+        </TreeView>
+    </DockPanel>
+</Window>

@@ -66,52 +66,46 @@ def parse_localization(game_dir: str, progress_fn=None) -> dict[str, str]:
         return {}
 
     entries = parse_pamt(pamt_path, paz_dir=dir_0020)
-    loc_entry = None
-    for e in entries:
-        if "localizationstring_eng" in e.path.lower():
-            loc_entry = e
-            break
-    if not loc_entry:
+    loc_entries = [e for e in entries if "localizationstring_eng" in e.path.lower()
+                   or e.path.lower().endswith(".paloc")]
+    if not loc_entries:
         return {}
 
-    read_size = loc_entry.comp_size if loc_entry.compressed else loc_entry.orig_size
-    with open(loc_entry.paz_file, 'rb') as f:
-        f.seek(loc_entry.offset)
-        raw = f.read(read_size)
-
-    dec = decrypt(raw, loc_entry.path)
-    data = lz4.block.decompress(dec, uncompressed_size=loc_entry.orig_size)
-
-    # Binary format: length-prefixed strings in pairs (id, text), separated by
-    # variable-length gaps. Scan for numeric ID strings and capture following text.
     loc_dict = {}
+    for loc_entry in loc_entries:
+        try:
+            read_size = loc_entry.comp_size if loc_entry.compressed else loc_entry.orig_size
+            with open(loc_entry.paz_file, 'rb') as f:
+                f.seek(loc_entry.offset)
+                raw = f.read(read_size)
 
-    # Find all [u32 len][digit string] patterns — these are loc IDs
-    pos = 0
-    while pos + 8 < len(data):
-        # Try reading a length-prefixed string
-        slen = struct.unpack_from('<I', data, pos)[0]
-        if slen == 0 or slen > 50000 or pos + 4 + slen > len(data):
-            pos += 1
-            continue
+            dec = decrypt(raw, os.path.basename(loc_entry.path))
+            data = lz4.block.decompress(dec, uncompressed_size=loc_entry.orig_size) if loc_entry.compressed else dec
 
-        s_bytes = data[pos + 4:pos + 4 + slen]
-
-        # Check if this is a numeric ID (10-20 digit string, all ASCII digits)
-        if 6 <= slen <= 20 and all(0x30 <= b <= 0x39 for b in s_bytes):
-            id_str = s_bytes.decode('ascii')
-            # Next should be the text string
-            text_pos = pos + 4 + slen
-            if text_pos + 4 < len(data):
-                text_len = struct.unpack_from('<I', data, text_pos)[0]
-                if 0 < text_len < 50000 and text_pos + 4 + text_len <= len(data):
-                    text = data[text_pos + 4:text_pos + 4 + text_len].decode(
-                        'utf-8', errors='replace')
-                    loc_dict[id_str] = text
-                    pos = text_pos + 4 + text_len
+            pos = 0
+            while pos + 8 < len(data):
+                slen = struct.unpack_from('<I', data, pos)[0]
+                if slen == 0 or slen > 50000 or pos + 4 + slen > len(data):
+                    pos += 1
                     continue
 
-        pos += 1
+                s_bytes = data[pos + 4:pos + 4 + slen]
+
+                if 6 <= slen <= 25 and all(0x30 <= b <= 0x39 for b in s_bytes):
+                    id_str = s_bytes.decode('ascii')
+                    text_pos = pos + 4 + slen
+                    if text_pos + 4 < len(data):
+                        text_len = struct.unpack_from('<I', data, text_pos)[0]
+                        if 0 < text_len < 50000 and text_pos + 4 + text_len <= len(data):
+                            text = data[text_pos + 4:text_pos + 4 + text_len].decode(
+                                'utf-8', errors='replace')
+                            loc_dict[id_str] = text
+                            pos = text_pos + 4 + text_len
+                            continue
+
+                pos += 1
+        except Exception:
+            continue
 
     return loc_dict
 
@@ -120,7 +114,7 @@ def parse_localization(game_dir: str, progress_fn=None) -> dict[str, str]:
 
 def parse_iteminfo(game_dir: str, loc_dict: dict[str, str],
                    progress_fn=None) -> list[ItemRecord]:
-    """Parse iteminfo.pabgb → list of ItemRecord with resolved display names."""
+    """Parse item database → list of ItemRecord with resolved display names."""
     if progress_fn:
         progress_fn("Loading item database...")
 
@@ -130,24 +124,85 @@ def parse_iteminfo(game_dir: str, loc_dict: dict[str, str],
         return []
 
     pamt = parse_pamt(pamt_path, paz_dir=dir_0008)
+
+    # Check for new staticinfo format first
+    hdr_entry = None
+    body_entry = None
     ii_entry = None
     for e in pamt:
-        if "iteminfo.pabgb" in e.path:
+        lower = e.path.lower()
+        if "iteminfo.staticinfoheader" in lower:
+            hdr_entry = e
+        elif "iteminfo.staticinfobody" in lower:
+            body_entry = e
+        elif "iteminfo.pabgb" in lower:
             ii_entry = e
-            break
-    if not ii_entry:
-        return []
 
+    if hdr_entry and body_entry:
+        return _parse_iteminfo_static(hdr_entry, body_entry, loc_dict)
+    elif ii_entry:
+        return _parse_iteminfo_legacy(ii_entry, loc_dict)
+    return []
+
+
+def _parse_iteminfo_static(hdr_entry, body_entry, loc_dict: dict[str, str]) -> list[ItemRecord]:
+    with open(hdr_entry.paz_file, 'rb') as f:
+        f.seek(hdr_entry.offset)
+        raw_h = f.read(hdr_entry.comp_size if hdr_entry.compressed else hdr_entry.orig_size)
+    hdr = lz4.block.decompress(raw_h, hdr_entry.orig_size) if hdr_entry.compressed else raw_h
+
+    with open(body_entry.paz_file, 'rb') as f:
+        f.seek(body_entry.offset)
+        raw_b = f.read(body_entry.comp_size if body_entry.compressed else body_entry.orig_size)
+    body = lz4.block.decompress(raw_b, body_entry.orig_size) if body_entry.compressed else raw_b
+
+    count = struct.unpack_from('<H', hdr, 0)[0]
+    items = []
+    seen_ids = set()
+
+    for i in range(count):
+        item_id, off = struct.unpack_from('<II', hdr, 2 + i * 8)
+        if item_id in seen_ids or off >= len(body):
+            continue
+        seen_ids.add(item_id)
+
+        next_off = struct.unpack_from('<II', hdr, 2 + (i + 1) * 8)[1] if i + 1 < count else len(body)
+        next_off = min(next_off, len(body))
+
+        nlen = struct.unpack_from('<I', body, off)[0]
+        if nlen <= 0 or off + 4 + nlen > len(body):
+            continue
+        name = body[off + 4:off + 4 + nlen].decode('ascii', errors='replace')
+
+        loc_key = str((item_id << 32) | 0x70)
+        display_name = loc_dict.get(loc_key, "")
+        if not display_name:
+            display_name = name.replace('_', ' ')
+
+        item_chunk = body[off:next_off]
+        prefab_hashes = []
+        for p in range(0, len(item_chunk) - 3, 4):
+            h = struct.unpack_from('<I', item_chunk, p)[0]
+            if h != 0 and h != item_id:
+                prefab_hashes.append(h)
+
+        items.append(ItemRecord(
+            item_id=item_id,
+            internal_name=name,
+            display_name=display_name,
+            prefab_hashes=prefab_hashes,
+        ))
+
+    return items
+
+
+def _parse_iteminfo_legacy(ii_entry, loc_dict: dict[str, str]) -> list[ItemRecord]:
     read_size = ii_entry.comp_size if ii_entry.compressed else ii_entry.orig_size
     with open(ii_entry.paz_file, 'rb') as f:
         f.seek(ii_entry.offset)
         raw = f.read(read_size)
 
     data = lz4.block.decompress(raw, uncompressed_size=ii_entry.orig_size)
-
-    # Scan using full marker: [name_null][01 00 00 00 00 00 00 00][07 70 00 00 00]
-    # Walk back from null byte to get item name + id.
-    # After 07 70 00 00 00: [item_id 4B][loc_len 4B][loc_str]
     FULL_MARKER = b'\x00\x01\x00\x00\x00\x00\x00\x00\x00\x07\x70\x00\x00\x00'
     items = []
     seen_ids = set()
@@ -159,9 +214,7 @@ def parse_iteminfo(game_dir: str, loc_dict: dict[str, str],
             break
         idx = pos + len(FULL_MARKER)
 
-        null_pos = pos  # first byte of marker is the name's null terminator
-
-        # Walk back to find ASCII name
+        null_pos = pos
         name_start = null_pos
         while name_start > 0 and data[name_start - 1] >= 0x21 and data[name_start - 1] <= 0x7e:
             name_start -= 1
@@ -184,8 +237,7 @@ def parse_iteminfo(game_dir: str, loc_dict: dict[str, str],
             continue
         seen_ids.add(item_id)
 
-        # Read loc_id: marker ends at pos+14, then [item_id 4B][loc_len 4B][loc_str]
-        loc_off = pos + 14 + 4  # skip marker + item_id repeat
+        loc_off = pos + 14 + 4
         loc_str = ""
         if loc_off + 4 < len(data):
             loc_len = struct.unpack_from('<I', data, loc_off)[0]
@@ -194,7 +246,6 @@ def parse_iteminfo(game_dir: str, loc_dict: dict[str, str],
                 if all(0x30 <= b <= 0x39 for b in loc_bytes):
                     loc_str = loc_bytes.decode('ascii')
 
-        # Find prefab hashes: search for 0E marker in next 800 bytes
         prefab_hashes = []
         search_end = min(len(data), pos + 800)
         for scan in range(pos + 14, search_end - 15):
@@ -447,18 +498,16 @@ def build_character_index(pamt_entries: list, prefab_pac_map: dict,
 
                 label = _parse_app_label(app_name)
 
-                # Extract display name from meshparam or voice event
+                # Extract display name from sound/voice event
                 extra_names = []
-                cust = root.find('Customization')
-                if cust is not None:
-                    mpf = cust.get('MeshParamFile', '')
-                    m = re.match(r'meshparam_example_(\w+)\.xml', mpf)
-                    if m:
-                        extra_names.append(m.group(1))
                 for se in root.findall('.//SoundEvent'):
                     vname = se.get('Name', '')
                     if vname.startswith('vce_pc_'):
                         extra_names.append(vname[7:])  # strip "vce_pc_"
+
+                if label.lower() == 'damian' or 'damian' in app_name.lower():
+                    label = "Damiane"
+                    extra_names.extend(["damiane", "damian", "phw"])
 
                 search_key = f"{app_name} {label} {' '.join(extra_names)}".lower()
 
