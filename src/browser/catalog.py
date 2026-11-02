@@ -70,8 +70,6 @@ def build_catalog(game_dir: str, progress_fn=None) -> tuple[list[CatalogEntry], 
                 fname = os.path.basename(e.path)
                 stem = os.path.splitext(fname)[0]
                 skey = stem.lower()
-                if "damian" in skey or skey.startswith("cd_phw_") or skey.startswith("phw_"):
-                    skey += " damiane damian phw"
                 catalog.append(CatalogEntry(
                     filename=fname, display_name=stem,
                     paz_entry=e, search_key=skey,
